@@ -6,7 +6,7 @@
   :root{
     --bg1:#0d1524; --bg2:#0a0f1a; --ink:#e7f0ff; --dim:#7d8ba3;
     --cyan:#35d0ff; --amber:#ffb020; --green:#34e29b; --slate:#6b7a8f; --off:#5a5f66;
-    --wait:#4f8fb0;
+    --wait:#4f8fb0; --lock:#ff5a6a;
   }
   *{margin:0;padding:0;box-sizing:border-box;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;}
   html,body{background:transparent;overflow:hidden;user-select:none;}
@@ -63,8 +63,8 @@
   <div id="veron"><span id="vdot"></span><span id="vtext">connecting to Veron 5090…</span></div>
 </div>
 <script>
-const C = {listening:'--cyan',thinking:'--amber',speaking:'--green',paused:'--slate',offline:'--off',waiting:'--wait'};
-const LABEL = {listening:'Listening',thinking:'Thinking…',speaking:'Speaking',paused:'Paused',offline:'Offline',starting:'Starting…',waiting:'Say “Hey Jarvis”'};
+const C = {listening:'--cyan',thinking:'--amber',speaking:'--green',paused:'--slate',offline:'--off',waiting:'--wait',locked:'--lock'};
+const LABEL = {listening:'Listening',thinking:'Thinking…',speaking:'Speaking',paused:'Paused',offline:'Offline',starting:'Starting…',waiting:'Say “Hey Jarvis”',locked:'Locked'};
 const cssv = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 
 let state='offline', micOn=true, level=0, connected=false;
@@ -122,7 +122,7 @@ function draw(){
 
   // blink logic
   if(t>nextBlink){ blink=0; if(t>nextBlink+7){ blink=1; nextBlink=t+120+Math.random()*160; } }
-  const eyeOpenT = state==='offline'?0.06 : state==='waiting'?0.5 : (!micOn?0.4 : blink);
+  const eyeOpenT = (state==='offline'||state==='locked')?0.06 : state==='waiting'?0.5 : (!micOn?0.4 : blink);
   eyeOpenC=lerp(eyeOpenC,eyeOpenT,.4);
   pupilYC=lerp(pupilYC, thinking?-3.2:0, .1);
   const pupilX = thinking? Math.sin(t*.05)*2.4 : 0;
@@ -176,7 +176,7 @@ function draw(){
   // mouth
   const my=cy+40;
   g.strokeStyle=col; g.lineWidth=3.4; g.lineCap='round';
-  if(state==='offline'){
+  if(state==='offline'||state==='locked'){
     g.beginPath(); g.moveTo(cx-20,my); g.lineTo(cx+20,my); g.stroke();
   } else if(mouthC>0.04){
     const mo=6+mouthC*30;
@@ -203,8 +203,8 @@ function roundRect(x,y,w,h,r){ g.beginPath(); g.moveTo(x+r,y);
   g.arcTo(x,y+h,x,y,r); g.arcTo(x,y,x+w,y,r); g.closePath(); }
 // demo override for screenshots: index.html?demo=speaking|thinking|listening|paused|offline
 if(DEMO){ state=DEMO; micOn=(DEMO!=='paused'); if(DEMO==='speaking') level=0.6;
-  cap.textContent = DEMO==='speaking'?'Opening Firefox.':(DEMO==='listening'?'“open firefox”':'');
-  cap.style.color=cssv(DEMO==='speaking'?'--cyan':'--ink'); applyState(); }
+  cap.textContent = DEMO==='speaking'?'Opening Firefox.':(DEMO==='listening'?'“open firefox”':(DEMO==='locked'?'Grant says: text me “I’m in” to unlock.':''));
+  cap.style.color=cssv(DEMO==='locked'?'--lock':(DEMO==='speaking'?'--cyan':'--ink')); applyState(); }
 applyState(); draw();
 </script>
 </body>

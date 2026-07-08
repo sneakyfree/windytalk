@@ -33,6 +33,10 @@ WAKE = os.environ.get("JARVIS_WAKE", "0") == "1"
 # to ws://10.10.0.6:8765 if the client can route to the box over WireGuard.
 LOCAL_SERVER_URL = os.environ.get("JARVIS_LOCAL_URL", "ws://localhost:8765")
 
+# License key for this copy (Grant issues these; blank = fine while the server has
+# no licenses.json, i.e. gating disabled). The server can lock/expire it remotely.
+LICENSE = os.environ.get("JARVIS_LICENSE", "")
+
 # OpenAI Realtime
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.environ.get("JARVIS_OPENAI_MODEL", "gpt-realtime-2.1-mini")

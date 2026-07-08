@@ -34,6 +34,7 @@ class LocalBrain(Brain):
 
     def __init__(self, url: str | None = None):
         self.url = url or config.LOCAL_SERVER_URL
+        self.locked = False
 
     @property
     def ready(self):
@@ -45,11 +46,14 @@ class LocalBrain(Brain):
         async with aiohttp.ClientSession() as sess:
             async with sess.ws_connect(self.url, max_msg_size=0, heartbeat=20) as ws:
                 await ws.send_json({"type": "hello", "tools": _chat_tools(),
-                                    "prompt": config.SYSTEM_PROMPT})
+                                    "prompt": config.SYSTEM_PROMPT,
+                                    "license": config.LICENSE})
 
                 async def pump():
                     while True:
                         data = await mic.read()
+                        if self.locked:               # locked → stream silence
+                            data = b"\x00" * len(data)
                         await ws.send_bytes(data)
 
                 pump_task = asyncio.create_task(pump())
@@ -73,6 +77,17 @@ class LocalBrain(Brain):
                                 log(f"Windy: {ev.get('text', '').strip()}")
                             elif t == "ready":
                                 log("connected to Veron brain")
+                            elif t == "locked":
+                                self.locked = True
+                                log(f"🔒 {ev.get('message', 'Locked by Grant.')}")
+                            elif t == "unlocked":
+                                self.locked = False
+                                log("🔓 Unlocked.")
+                            elif t == "denied":
+                                log(f"⛔ {ev.get('message', 'No valid license.')}")
+                                import asyncio as _a
+                                await _a.sleep(8)               # back off, don't hammer
+                                return
                         elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                             break
                 finally:

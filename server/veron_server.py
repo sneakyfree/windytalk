@@ -23,6 +23,7 @@ Protocol (one websocket per client):
 Env: WJ_MODEL (ollama model), WJ_WHISPER (base/small/...), WJ_VOICE, WJ_PORT.
 """
 import asyncio
+import datetime
 import json
 import os
 import re
@@ -172,9 +173,48 @@ class Segmenter:
         return n >= SPEECH_ONSET_MS
 
 
+# --- Licensing / remote control -------------------------------------------
+LICENSES_PATH = os.path.join(HERE, "licenses.json")
+ONLINE_PATH = os.path.join(HERE, "online.json")
+_online: dict = {}
+
+
+def check_license(key):
+    """Return (status, record). status: open|active|locked|expired|unknown.
+    If licenses.json doesn't exist, gating is disabled ('open')."""
+    if not os.path.exists(LICENSES_PATH):
+        return ("open", {})
+    try:
+        with open(LICENSES_PATH) as f:
+            rec = json.load(f).get(key or "")
+    except Exception:
+        return ("open", {})
+    if not rec:
+        return ("unknown", {})
+    if rec.get("status") == "locked":
+        return ("locked", rec)
+    exp = rec.get("expires")
+    if exp:
+        try:
+            if datetime.date.fromisoformat(str(exp)) < datetime.date.today():
+                return ("expired", rec)
+        except Exception:
+            pass
+    return ("active", rec)
+
+
+def _write_online():
+    try:
+        with open(ONLINE_PATH, "w") as f:
+            json.dump(list(_online.values()), f, indent=2)
+    except Exception:
+        pass
+
+
 async def handle(ws):
     peer = ws.remote_address
-    print(f"[+] client {peer}", flush=True)
+    sid = f"{peer[0]}:{peer[1]}"
+    sess = {"key": "", "name": "guest", "locked": False, "authed": False}
     tools, prompt = [], DEFAULT_PROMPT
     history = [{"role": "system", "content": prompt}]
     seg = Segmenter()
@@ -184,10 +224,18 @@ async def handle(ws):
     utter_q: asyncio.Queue = asyncio.Queue()
     loop = asyncio.get_running_loop()
 
+    def go_online(status):
+        _online[sid] = {"license": sess["key"], "name": sess["name"], "ip": peer[0],
+                        "since": time.strftime("%Y-%m-%d %H:%M:%S"), "status": status}
+        _write_online()
+        print(f"[+] {sess['name']} ({sess['key'] or 'no-key'}) {peer[0]} — {status}", flush=True)
+
     async def reader():
         nonlocal tools, prompt, history
         async for msg in ws:
             if isinstance(msg, (bytes, bytearray)):
+                if sess["locked"] or not sess["authed"]:
+                    continue
                 if speaking.is_set() and seg.onset(bytes(msg)):
                     interrupt.set()
                 for kind, data in seg.push(bytes(msg)):
@@ -198,13 +246,57 @@ async def handle(ws):
                     tools = ev.get("tools", [])
                     prompt = ev.get("prompt") or DEFAULT_PROMPT
                     history = [{"role": "system", "content": prompt}]
-                    await ws.send(json.dumps({"type": "ready"}))
+                    sess["key"] = ev.get("license", "")
+                    status, rec = check_license(sess["key"])
+                    sess["name"] = rec.get("name", "guest")
+                    if status == "unknown":
+                        await ws.send(json.dumps({"type": "denied", "message":
+                            "This copy has no valid license. Ask Grant for a key."}))
+                        await ws.close(); return
+                    sess["authed"] = True
+                    if status in ("locked", "expired"):
+                        sess["locked"] = True
+                        go_online(status)
+                        await send_locked(rec, status)
+                    else:
+                        go_online(status)
+                        await ws.send(json.dumps({"type": "ready"}))
                 elif ev.get("type") == "tool_result":
                     fut = pending.get(ev.get("id"))
                     if fut and not fut.done():
                         fut.set_result(ev.get("output", ""))
 
+    async def send_locked(rec, status):
+        msg = rec.get("gate_message") or (
+            "Your trial has expired." if status == "expired"
+            else "Grant has locked this Windy for now.")
+        await ws.send(json.dumps({"type": "locked", "name": rec.get("name", "?"),
+                                  "reason": status, "message": msg,
+                                  "url": rec.get("gate_url", "")}))
+        await stream_audio("Grant has locked me. " + msg)
+
+    async def monitor():
+        while True:
+            await asyncio.sleep(3)
+            if not sess["authed"]:
+                continue
+            status, rec = check_license(sess["key"])
+            locked_now = status in ("locked", "expired", "unknown")
+            if locked_now and not sess["locked"]:
+                sess["locked"] = True
+                if sid in _online:
+                    _online[sid]["status"] = status; _write_online()
+                await send_locked(rec, status)
+            elif not locked_now and sess["locked"]:
+                sess["locked"] = False
+                if sid in _online:
+                    _online[sid]["status"] = "active"; _write_online()
+                await ws.send(json.dumps({"type": "unlocked"}))
+                await stream_audio("You're unlocked. What can I do for you?")
+
     async def stream_audio(text):
+        if not text:
+            return
         pcm = await loop.run_in_executor(None, synth_pcm, text)
         await ws.send(json.dumps({"type": "audio_start"}))
         speaking.set(); interrupt.clear()
@@ -254,22 +346,28 @@ async def handle(ws):
     async def worker():
         while True:
             data = await utter_q.get()
+            if sess["locked"] or not sess["authed"]:
+                continue
             text = await loop.run_in_executor(None, transcribe, data)
             if not text or len(text) < 2:
                 continue
-            print(f"    heard: {text}", flush=True)
+            print(f"    [{sess['name']}] heard: {text}", flush=True)
             await ws.send(json.dumps({"type": "heard", "text": text}))
             try:
                 await think(text)
             except Exception as e:
                 print("    think error:", e, flush=True)
 
+    tasks = [asyncio.create_task(worker()), asyncio.create_task(monitor())]
     try:
-        await asyncio.gather(reader(), worker())
+        await reader()
     except websockets.ConnectionClosed:
         pass
     finally:
-        print(f"[-] client {peer} gone", flush=True)
+        for t in tasks:
+            t.cancel()
+        _online.pop(sid, None); _write_online()
+        print(f"[-] {sess['name']} ({peer[0]}) gone", flush=True)
 
 
 async def main():

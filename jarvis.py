@@ -34,7 +34,8 @@ async def main(provider_name, use_ui=False, use_wake=False):
 
     mic = audio.Mic(brain.input_rate, config.CHUNK_MS)
     speaker = audio.Speaker(brain.output_rate)
-    st = {"stop": False, "connected": False, "thinking": False, "awake": not use_wake}
+    st = {"stop": False, "connected": False, "thinking": False,
+          "awake": not use_wake, "locked": None}
 
     if use_wake:
         from wake import WakeGate
@@ -67,6 +68,14 @@ async def main(provider_name, use_ui=False, use_wake=False):
 
     def log(line):
         print(f"  {line}")
+        if line.startswith(("🔒", "⛔")):
+            st["locked"] = line[1:].strip()
+            if bridge:
+                bridge.status("locked"); bridge.emit({"type": "say", "text": st["locked"]})
+            return
+        if line.startswith("🔓"):
+            st["locked"] = None
+            return
         if not bridge:
             return
         if line.startswith("You:"):
@@ -82,7 +91,8 @@ async def main(provider_name, use_ui=False, use_wake=False):
         while not st["stop"]:
             if speaker.speaking:
                 st["thinking"] = False
-            state = ("offline" if not st["connected"] else
+            state = ("locked" if st["locked"] else
+                     "offline" if not st["connected"] else
                      "paused" if mic.paused else
                      "speaking" if speaker.speaking else
                      "thinking" if st["thinking"] else
