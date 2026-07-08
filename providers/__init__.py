@@ -12,11 +12,17 @@ def _gemini(**kw):
     return GeminiLiveBrain(**kw)
 
 
+def _local(**kw):
+    from providers.local import LocalBrain
+    return LocalBrain(**kw)
+
+
 # name -> factory (lazy so we don't import an SDK unless that provider is used)
 REGISTRY = {
-    "gemini": _gemini,
-    "openai": _openai,
-    # future: "aws" (Nova Sonic), "pumpme"/"local" (Pipecat STT+LLM+TTS pipeline)
+    "local": _local,     # Veron-1-5090 brain server (faster-whisper + Ollama + Kokoro)
+    "gemini": _gemini,   # Google Gemini Live (cloud)
+    "openai": _openai,   # OpenAI Realtime (cloud)
+    # future: "aws" (Nova Sonic)
 }
 
 

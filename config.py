@@ -22,8 +22,13 @@ def _load_dotenv():
 _load_dotenv()
 
 # --- Brain (voice model) -----------------------------------------------------
-# Which brain to start with. Any key in providers.REGISTRY: "gemini", "openai", ...
-PROVIDER = os.environ.get("JARVIS_PROVIDER", "gemini")
+# Which brain to start with. Any key in providers.REGISTRY: "local", "gemini", "openai".
+# Default "local" = free, on the Veron-1-5090 GPU box.
+PROVIDER = os.environ.get("JARVIS_PROVIDER", "local")
+
+# Local brain server (Veron 1). Default = SSH tunnel on localhost; or set directly
+# to ws://10.10.0.6:8765 if the client can route to the box over WireGuard.
+LOCAL_SERVER_URL = os.environ.get("JARVIS_LOCAL_URL", "ws://localhost:8765")
 
 # OpenAI Realtime
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")

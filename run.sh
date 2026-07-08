@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Windy Jarvis launcher — sets up the Wayland "hands" environment, then starts the
-# always-on voice agent.
+# Windy Jarvis launcher — sets up the Wayland "hands", ensures the local brain
+# tunnel is up, then starts the always-on voice agent.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -16,6 +16,20 @@ fi
 gsettings set org.gnome.desktop.interface toolkit-accessibility true 2>/dev/null || true
 
 # 3) Load .env if present (also handled inside config.py).
-[ -f .env ] && set -a && . ./.env && set +a || true
+[ -f .env ] && set -a && . ./.env || true
+set +a 2>/dev/null || true
+
+# 4) For the local (Veron-5090) brain, ensure the SSH tunnel to the server is up.
+PROVIDER="${JARVIS_PROVIDER:-local}"
+case " $* " in *" --provider "*) PROVIDER=$(echo " $* " | sed -n 's/.*--provider \([^ ]*\).*/\1/p');; esac
+if [ "$PROVIDER" = "local" ]; then
+  VERON_HOST="${WJ_VERON_HOST:-wg-veron}"
+  if ! (exec 3<>/dev/tcp/localhost/8765) 2>/dev/null; then
+    echo "Opening SSH tunnel to the Veron brain server ($VERON_HOST)…"
+    setsid ssh -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 \
+      -N -L 8765:localhost:8765 "$VERON_HOST" >/dev/null 2>&1 &
+    for i in $(seq 1 10); do (exec 3<>/dev/tcp/localhost/8765) 2>/dev/null && break; sleep 1; done
+  fi
+fi
 
 exec python3 jarvis.py "$@"

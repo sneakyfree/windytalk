@@ -39,16 +39,34 @@ whichever you want.
 brains. A brain is one file in `providers/` implementing the `Brain` interface in
 `providers/base.py`; register it in `providers/__init__.py` and it's selectable.
 
-## Setup
+## Setup — local brain (default, free, on the Veron-1-5090)
 
-1. `cp .env.example .env`
-2. Put a key in it — Gemini is free: get one at https://aistudio.google.com/apikey
-3. `./run.sh`                     # or `./run.sh --provider openai`
+The default brain runs entirely on the RTX 5090 in the Veron 1 box: faster-whisper
+(STT) → Ollama `qwen2.5:7b-instruct` (LLM + tool calling) → kokoro-onnx (TTS). No
+cloud, no API key, ~$0/hour. The server is a persistent systemd service on Veron;
+the client reaches it through an SSH tunnel that `run.sh` opens automatically.
 
-Check readiness anytime: `python3 jarvis.py --list`
+```
+./run.sh          # opens the tunnel to wg-veron, then starts listening
+```
 
-Deps (aiohttp, google-genai, PyAudio, PyGObject, ydotool, flameshot) are already on
-Windy 0. `run.sh` starts the ydotool daemon, enables AT-SPI, and launches.
+That's it. `run.sh` starts ydotoold, enables AT-SPI, tunnels `localhost:8765` to the
+Veron server, and launches. Deps (aiohttp, PyAudio, PyGObject, ydotool, flameshot)
+are already on Windy 0. Check brains: `python3 jarvis.py --list`.
+
+**The brain server** lives in `server/` and runs on Veron 1 at
+`~/windy-jarvis-server/` as the `windy-jarvis` user service:
+```
+systemctl --user status windy-jarvis      # on Veron
+server/veron_server.py                     # the STT→LLM→TTS websocket server
+server/test_client.py "open the calculator"    # headless loopback test (on Veron)
+server/integration_test.py /tmp/utter16k.pcm   # full distributed test (on a client)
+```
+
+### Cloud brains (optional)
+
+`./run.sh --provider gemini` or `--provider openai` — put a key in `.env` first
+(Gemini is free: https://aistudio.google.com/apikey).
 
 ## Try saying
 
