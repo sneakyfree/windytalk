@@ -29,9 +29,10 @@ PROVIDER = os.environ.get("JARVIS_PROVIDER", "local")
 # Hands-free wake word: wait for "Hey Jarvis" before listening (also --wake flag).
 WAKE = os.environ.get("JARVIS_WAKE", "0") == "1"
 
-# Local brain server (Veron 1). Default = SSH tunnel on localhost; or set directly
-# to ws://10.10.0.6:8765 if the client can route to the box over WireGuard.
-LOCAL_SERVER_URL = os.environ.get("JARVIS_LOCAL_URL", "ws://localhost:8765")
+# Brain server endpoint. Default = the public, license-gated Veron-5090 endpoint
+# (works anywhere over the internet). For lowest latency on the LAN/fleet, set
+# JARVIS_LOCAL_URL=ws://localhost:8765 and run.sh will open the SSH tunnel instead.
+LOCAL_SERVER_URL = os.environ.get("JARVIS_LOCAL_URL", "wss://jarvis.thewindstorm.uk")
 
 # License key for this copy (Grant issues these; blank = fine while the server has
 # no licenses.json, i.e. gating disabled). The server can lock/expire it remotely.

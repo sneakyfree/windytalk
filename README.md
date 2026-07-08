@@ -123,15 +123,37 @@ python3 selftest.py    # opens Calculator and computes 7+5=12 by clicking via AT
 - **Electron/Chromium apps** expose empty accessibility trees unless launched with
   `ACCESSIBILITY_ENABLED=1`.
 
+## Sharing copies (licensed, remotely controlled)
+
+The brain runs on the Veron-5090, reachable at a public, license-gated endpoint
+(`wss://jarvis.thewindstorm.uk`) — so a copy needs a key you issue, and you control
+it live from the box. On Veron:
+
+```
+python3 server/admin.py new "Bill"          # mint a key
+python3 server/admin.py list                # see licenses + who's connected NOW
+python3 server/admin.py lock  WINDY-XXXXXX "Text Grant to unlock."   # freeze a copy
+python3 server/admin.py unlock WINDY-XXXXXX
+python3 server/admin.py expire WINDY-XXXXXX 2026-08-01               # time-limit it
+```
+
+Build + hand out a copy:
+```
+scripts/package-client.sh                   # -> ~/windy-jarvis-client.tar.gz (no server/, no keys)
+# send the tarball + their key; they run:
+tar xzf windy-jarvis-client.tar.gz && cd windy-jarvis && scripts/install-client.sh WINDY-XXXXXX
+```
+The installer pulls system deps (ydotool, flameshot, AT-SPI, portaudio, node), Python
+deps, the Electron app, writes their `.env` (key + endpoint), and adds the app-grid
+launcher. When they run it, you see them online and hold the kill switch. A locked
+copy shows a red face and Windy speaks your unlock message aloud.
+
 ## Roadmap
 
 - **Done:** local Veron-5090 brain (free); provider pivot (local / Gemini / OpenAI);
-  desktop face app; "Hey Jarvis" wake word; GNOME double-click launcher.
-- **Next — boardroom portability:** the launcher makes it double-click *on a set-up
-  machine*, but a truly portable installer (Bill's laptop, etc.) needs the Python
-  client to be self-contained — bundle Python + deps (ydotool, AT-SPI, flameshot) and
-  the Veron connection into one artifact (AppImage/installer). That's the real
-  packaging project; the Electron shell alone can't carry those system deps.
+  desktop face app; "Hey Jarvis" wake word; GNOME launcher; **public licensed endpoint
+  + remote lock/expire/who's-online + client packaging/installer**.
+- **Next:** a single-binary bundle (PyInstaller/AppImage) so users skip even the
+  installer; concurrent-session limits per key (anti-sharing); a web admin dashboard.
 - **Later:** AWS Nova Sonic adapter; cross-platform hands (macOS `agent-desktop`,
-  Windows UIAutomation); custom "Hey Windy" wake model (needs training vs the stock
-  "Hey Jarvis").
+  Windows UIAutomation) so non-Linux friends can run it; custom "Hey Windy" wake model.
