@@ -1,0 +1,8 @@
+# All already present in the Windy 0 system Python (3.14). Listed for portability.
+# NOTE: PyGObject/gi (AT-SPI) must come from the system package (python3-gobject,
+# gtk3, at-spi2-core) — it is not reliably pip-installable. Use system python3.
+aiohttp>=3.13
+PyAudio>=0.2.13
+numpy>=2.0
+# openai>=2.30      # only needed if you switch jarvis.py to the OpenAI SDK client
+# System packages (dnf): ydotool wtype flameshot python3-gobject at-spi2-core
