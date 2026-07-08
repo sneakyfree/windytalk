@@ -1,0 +1,210 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root{
+    --bg1:#0d1524; --bg2:#0a0f1a; --ink:#e7f0ff; --dim:#7d8ba3;
+    --cyan:#35d0ff; --amber:#ffb020; --green:#34e29b; --slate:#6b7a8f; --off:#5a5f66;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;}
+  html,body{background:transparent;overflow:hidden;user-select:none;}
+  #box{
+    width:340px;height:500px;border-radius:26px;position:relative;
+    background:radial-gradient(120% 90% at 50% 0%,var(--bg1),var(--bg2));
+    border:1px solid rgba(120,160,220,.14);
+    box-shadow:0 24px 60px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.05);
+    display:flex;flex-direction:column;align-items:center;
+  }
+  #bar{width:100%;height:34px;-webkit-app-region:drag;display:flex;align-items:center;
+    justify-content:space-between;padding:0 14px;}
+  #title{font-size:11px;letter-spacing:.14em;color:var(--dim);text-transform:uppercase;}
+  #x{-webkit-app-region:no-drag;cursor:pointer;color:var(--dim);font-size:15px;line-height:1;
+    width:22px;height:22px;border-radius:6px;display:grid;place-items:center;}
+  #x:hover{background:rgba(255,255,255,.06);color:var(--ink);}
+  #stage{width:240px;height:240px;margin-top:2px;}
+  #statusRow{display:flex;align-items:center;gap:8px;margin-top:6px;height:22px;}
+  #dot{width:9px;height:9px;border-radius:50%;background:var(--off);
+    box-shadow:0 0 10px currentColor;color:var(--off);transition:all .25s;}
+  #state{font-size:13px;letter-spacing:.03em;color:var(--ink);font-weight:600;}
+  #caption{height:34px;margin-top:2px;padding:0 26px;text-align:center;font-size:12px;
+    line-height:1.35;color:var(--dim);overflow:hidden;transition:color .2s;}
+  #btn{-webkit-app-region:no-drag;margin-top:6px;width:96px;height:96px;border-radius:50%;
+    cursor:pointer;border:none;position:relative;background:transparent;outline:none;}
+  #ring{position:absolute;inset:0;border-radius:50%;border:2px solid var(--slate);
+    transition:all .25s;}
+  #core{position:absolute;inset:10px;border-radius:50%;display:grid;place-items:center;
+    background:radial-gradient(90% 90% at 50% 30%,#18314a,#0e1c2c);
+    box-shadow:inset 0 2px 6px rgba(0,0,0,.5);transition:all .2s;}
+  #core svg{width:38px;height:38px;fill:none;stroke:var(--slate);stroke-width:2.2;
+    stroke-linecap:round;stroke-linejoin:round;transition:stroke .2s;}
+  #btnLabel{margin-top:8px;font-size:10px;letter-spacing:.22em;color:var(--dim);
+    text-transform:uppercase;}
+  #veron{position:absolute;bottom:14px;font-size:10px;letter-spacing:.1em;color:var(--dim);
+    display:flex;align-items:center;gap:6px;}
+  #vdot{width:6px;height:6px;border-radius:50%;background:var(--off);box-shadow:0 0 8px currentColor;color:var(--off);}
+  .on #ring{border-color:var(--cyan);box-shadow:0 0 22px rgba(53,208,255,.45);}
+  .on #core svg{stroke:var(--cyan);}
+</style>
+</head>
+<body>
+<div id="box">
+  <div id="bar"><div id="title">Windy Jarvis</div><div id="x" onclick="window.close()">✕</div></div>
+  <canvas id="stage" width="240" height="240"></canvas>
+  <div id="statusRow"><div id="dot"></div><div id="state">Starting…</div></div>
+  <div id="caption"></div>
+  <button id="btn"><div id="ring"></div>
+    <div id="core"><svg viewBox="0 0 24 24" id="mic">
+      <path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/>
+      <path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></div>
+  </button>
+  <div id="btnLabel">Tap to talk</div>
+  <div id="veron"><span id="vdot"></span><span id="vtext">connecting to Veron 5090…</span></div>
+</div>
+<script>
+const C = {listening:'--cyan',thinking:'--amber',speaking:'--green',paused:'--slate',offline:'--off'};
+const LABEL = {listening:'Listening',thinking:'Thinking…',speaking:'Speaking',paused:'Paused',offline:'Offline',starting:'Starting…'};
+const cssv = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+
+let state='offline', micOn=true, level=0, connected=false;
+const dot=document.getElementById('dot'), stateEl=document.getElementById('state'),
+      cap=document.getElementById('caption'), box=document.getElementById('box'),
+      vdot=document.getElementById('vdot'), vtext=document.getElementById('vtext'),
+      btn=document.getElementById('btn'), btnLabel=document.getElementById('btnLabel');
+
+function applyState(){
+  const col = cssv(state==='offline' && micOn ? '--off' : (micOn ? C[state] : '--slate'));
+  dot.style.background=col; dot.style.color=col;
+  stateEl.textContent = micOn ? (LABEL[state]||state) : 'Paused';
+  const online = state!=='offline';
+  vdot.style.background = vdot.style.color = cssv(online?'--green':'--off');
+  vtext.textContent = online ? 'Veron 5090 · online' : 'Veron 5090 · offline';
+  btn.classList.toggle('on', micOn);
+  btnLabel.textContent = micOn ? 'On — tap to mute' : 'Off — tap to talk';
+}
+btn.onclick=()=>{ micOn=!micOn; applyState(); send({type:'mic',on:micOn}); };
+
+// ---- websocket bridge to the agent (localhost:8770) ----
+let ws=null;
+function send(o){ try{ if(ws&&ws.readyState===1) ws.send(JSON.stringify(o)); }catch(e){} }
+function connect(){
+  ws=new WebSocket('ws://127.0.0.1:8770/ws');
+  ws.onopen=()=>{ connected=true; };
+  ws.onclose=()=>{ connected=false; state='offline'; applyState(); setTimeout(connect,1200); };
+  ws.onerror=()=>{ try{ws.close()}catch(e){} };
+  ws.onmessage=e=>{
+    const m=JSON.parse(e.data);
+    if(m.type==='status'){ state=m.state; if(state!=='paused') micOn = state!=='paused'; applyState(); }
+    else if(m.type==='level'){ level=m.v; }
+    else if(m.type==='heard'){ cap.textContent='“'+m.text+'”'; cap.style.color=cssv('--ink'); }
+    else if(m.type==='say'){ cap.textContent=m.text; cap.style.color=cssv('--cyan'); }
+  };
+}
+const DEMO = new URLSearchParams(location.search).get('demo');
+if (!DEMO) connect();
+
+// ---- the face ----
+const cv=document.getElementById('stage'), g=cv.getContext('2d');
+let t=0, blink=1, nextBlink=60, eyeOpenC=1, pupilYC=0, browYC=0, mouthC=0, glowC=0, hue={r:90,g:139,b:163};
+const lerp=(a,b,k)=>a+(b-a)*k;
+function hexToRgb(h){const n=parseInt(h.slice(1),16);return{r:n>>16&255,g:n>>8&255,b:n&255};}
+
+function draw(){
+  t++;
+  // targets by state
+  const active = state!=='offline';
+  const speaking = state==='speaking';
+  const thinking = state==='thinking';
+  const target = hexToRgb(cssv(micOn?(C[state]||'--off'):'--slate'));
+  hue.r=lerp(hue.r,target.r,.08); hue.g=lerp(hue.g,target.g,.08); hue.b=lerp(hue.b,target.b,.08);
+  const col=`rgb(${hue.r|0},${hue.g|0},${hue.b|0})`;
+
+  // blink logic
+  if(t>nextBlink){ blink=0; if(t>nextBlink+7){ blink=1; nextBlink=t+120+Math.random()*160; } }
+  const eyeOpenT = state==='offline'?0.06 : (!micOn?0.4 : blink);
+  eyeOpenC=lerp(eyeOpenC,eyeOpenT,.4);
+  pupilYC=lerp(pupilYC, thinking?-3.2:0, .1);
+  const pupilX = thinking? Math.sin(t*.05)*2.4 : 0;
+  browYC=lerp(browYC, thinking?2.5:(speaking?-2:0), .12);
+  const mouthT = speaking? Math.min(0.15+level*0.9,1) : 0;
+  mouthC=lerp(mouthC,mouthT,.5);
+  glowC=lerp(glowC, active?(speaking?1:.6):.12, .08);
+
+  g.clearRect(0,0,240,240);
+  const cx=120, cy=118;
+
+  // aura
+  const aura=g.createRadialGradient(cx,cy,20,cx,cy,120);
+  aura.addColorStop(0,`rgba(${hue.r|0},${hue.g|0},${hue.b|0},${.16*glowC+.03})`);
+  aura.addColorStop(1,'rgba(0,0,0,0)');
+  g.fillStyle=aura; g.fillRect(0,0,240,240);
+
+  // head
+  const breathe=Math.sin(t*.03)*1.2;
+  const hw=84, hh=90+breathe;
+  g.save();
+  const hg=g.createLinearGradient(cx,cy-hh,cx,cy+hh);
+  hg.addColorStop(0,'#1a2b40'); hg.addColorStop(1,'#0f1c2c');
+  g.fillStyle=hg; g.strokeStyle=col; g.lineWidth=2.5;
+  roundRect(cx-hw,cy-hh,hw*2,hh*2,42); g.fill();
+  g.globalAlpha=.55+glowC*.45; g.stroke(); g.globalAlpha=1;
+  g.restore();
+
+  // eyes
+  const ey=cy-14, ex=38, ew=20, eh=26*Math.max(eyeOpenC,0.04);
+  for(const s of [-1,1]){
+    g.fillStyle='#0a1420';
+    roundRect(cx+s*ex-ew/2, ey-eh/2, ew, eh, 9); g.fill();
+    if(eyeOpenC>0.25){
+      g.fillStyle=col;
+      const px=cx+s*ex+pupilX, py=ey+pupilYC;
+      g.beginPath(); g.arc(px,py,5.2,0,7); g.fill();
+      g.fillStyle='rgba(255,255,255,.85)';
+      g.beginPath(); g.arc(px-1.6,py-1.8,1.5,0,7); g.fill();
+    }
+    // brow
+    g.strokeStyle=col; g.lineWidth=3; g.globalAlpha=.7;
+    g.beginPath(); g.moveTo(cx+s*ex-13, ey-20+browYC*s* (s<0?1:1));
+    g.lineTo(cx+s*ex+13, ey-20+browYC); g.stroke(); g.globalAlpha=1;
+  }
+
+  // nose
+  g.strokeStyle=`rgba(${hue.r|0},${hue.g|0},${hue.b|0},.5)`; g.lineWidth=2.5;
+  g.beginPath(); g.moveTo(cx,cy+2); g.lineTo(cx-5,cy+14); g.lineTo(cx+3,cy+14); g.stroke();
+
+  // mouth
+  const my=cy+40;
+  g.strokeStyle=col; g.lineWidth=3.4; g.lineCap='round';
+  if(state==='offline'){
+    g.beginPath(); g.moveTo(cx-20,my); g.lineTo(cx+20,my); g.stroke();
+  } else if(mouthC>0.04){
+    const mo=6+mouthC*30;
+    g.fillStyle='#0a1420'; roundRect(cx-24, my-mo/2, 48, mo, mo/2); g.fill();
+    g.stroke();
+  } else if(thinking){
+    g.beginPath(); g.moveTo(cx-14,my+2); g.lineTo(cx+14,my+2); g.stroke();
+  } else { // gentle smile
+    g.beginPath(); g.moveTo(cx-22,my-2); g.quadraticCurveTo(cx,my+12,cx+22,my-2); g.stroke();
+  }
+
+  // thinking dots
+  if(thinking){
+    for(let i=0;i<3;i++){
+      const a=(Math.sin(t*.15-i*.6)+1)/2;
+      g.fillStyle=`rgba(${hue.r|0},${hue.g|0},${hue.b|0},${.3+a*.7})`;
+      g.beginPath(); g.arc(cx-16+i*16, cy+72, 3.2, 0, 7); g.fill();
+    }
+  }
+  requestAnimationFrame(draw);
+}
+function roundRect(x,y,w,h,r){ g.beginPath(); g.moveTo(x+r,y);
+  g.arcTo(x+w,y,x+w,y+h,r); g.arcTo(x+w,y+h,x,y+h,r);
+  g.arcTo(x,y+h,x,y,r); g.arcTo(x,y,x+w,y,r); g.closePath(); }
+// demo override for screenshots: index.html?demo=speaking|thinking|listening|paused|offline
+if(DEMO){ state=DEMO; micOn=(DEMO!=='paused'); if(DEMO==='speaking') level=0.6;
+  cap.textContent = DEMO==='speaking'?'Opening Firefox.':(DEMO==='listening'?'“open firefox”':'');
+  cap.style.color=cssv(DEMO==='speaking'?'--cyan':'--ink'); applyState(); }
+applyState(); draw();
+</script>
+</body>
+</html>
