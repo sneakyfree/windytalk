@@ -26,6 +26,9 @@ _load_dotenv()
 # Default "local" = free, on the Veron-1-5090 GPU box.
 PROVIDER = os.environ.get("JARVIS_PROVIDER", "local")
 
+# Hands-free wake word: wait for "Hey Jarvis" before listening (also --wake flag).
+WAKE = os.environ.get("JARVIS_WAKE", "0") == "1"
+
 # Local brain server (Veron 1). Default = SSH tunnel on localhost; or set directly
 # to ws://10.10.0.6:8765 if the client can route to the box over WireGuard.
 LOCAL_SERVER_URL = os.environ.get("JARVIS_LOCAL_URL", "ws://localhost:8765")

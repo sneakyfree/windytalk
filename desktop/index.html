@@ -6,6 +6,7 @@
   :root{
     --bg1:#0d1524; --bg2:#0a0f1a; --ink:#e7f0ff; --dim:#7d8ba3;
     --cyan:#35d0ff; --amber:#ffb020; --green:#34e29b; --slate:#6b7a8f; --off:#5a5f66;
+    --wait:#4f8fb0;
   }
   *{margin:0;padding:0;box-sizing:border-box;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;}
   html,body{background:transparent;overflow:hidden;user-select:none;}
@@ -62,8 +63,8 @@
   <div id="veron"><span id="vdot"></span><span id="vtext">connecting to Veron 5090…</span></div>
 </div>
 <script>
-const C = {listening:'--cyan',thinking:'--amber',speaking:'--green',paused:'--slate',offline:'--off'};
-const LABEL = {listening:'Listening',thinking:'Thinking…',speaking:'Speaking',paused:'Paused',offline:'Offline',starting:'Starting…'};
+const C = {listening:'--cyan',thinking:'--amber',speaking:'--green',paused:'--slate',offline:'--off',waiting:'--wait'};
+const LABEL = {listening:'Listening',thinking:'Thinking…',speaking:'Speaking',paused:'Paused',offline:'Offline',starting:'Starting…',waiting:'Say “Hey Jarvis”'};
 const cssv = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 
 let state='offline', micOn=true, level=0, connected=false;
@@ -121,7 +122,7 @@ function draw(){
 
   // blink logic
   if(t>nextBlink){ blink=0; if(t>nextBlink+7){ blink=1; nextBlink=t+120+Math.random()*160; } }
-  const eyeOpenT = state==='offline'?0.06 : (!micOn?0.4 : blink);
+  const eyeOpenT = state==='offline'?0.06 : state==='waiting'?0.5 : (!micOn?0.4 : blink);
   eyeOpenC=lerp(eyeOpenC,eyeOpenT,.4);
   pupilYC=lerp(pupilYC, thinking?-3.2:0, .1);
   const pupilX = thinking? Math.sin(t*.05)*2.4 : 0;

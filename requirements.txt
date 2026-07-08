@@ -1,5 +1,6 @@
 # All already present in the Windy 0 system Python (3.14). Listed for portability.
 google-genai>=2.10
+openwakeword>=0.6   # wake word (client); pulls onnxruntime
 # NOTE: PyGObject/gi (AT-SPI) must come from the system package (python3-gobject,
 # gtk3, at-spi2-core) — it is not reliably pip-installable. Use system python3.
 aiohttp>=3.13

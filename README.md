@@ -68,6 +68,31 @@ server/integration_test.py /tmp/utter16k.pcm   # full distributed test (on a cli
 `./run.sh --provider gemini` or `--provider openai` — put a key in `.env` first
 (Gemini is free: https://aistudio.google.com/apikey).
 
+## Desktop app (face + button)
+
+A little Electron window with an animated face (blinks, glances up when thinking,
+mouth lip-syncs to the reply), a big mic on/off button, and status lights
+(listening / thinking / speaking / waiting / offline, plus a "Veron online" dot).
+
+```
+bash scripts/install-launcher.sh    # adds "Windy Jarvis" to the GNOME app grid
+gtk-launch windy-jarvis             # or just double-click it in Activities
+# dev: cd desktop && npm install && npm start
+```
+
+The app is a thin shell: it spawns the Python agent (`run.sh --ui`) and reflects
+its state over a localhost websocket (`ui_bridge.py`, port 8770). It reimplements
+nothing — audio, hands, and the brain are unchanged.
+
+## Hands-free ("Hey Jarvis")
+
+```
+./run.sh --wake        # or JARVIS_WAKE=1, or --ui --wake with the app
+```
+The client stays asleep and streams nothing until it hears **"Hey Jarvis"** locally
+(openWakeWord, on CPU) — then it listens for your command and drifts back to sleep.
+Zero idle streaming. The face shows a dozing "Say Hey Jarvis" state while armed.
+
 ## Try saying
 
 - "Open Firefox." / "Open the calculator."
@@ -100,8 +125,13 @@ python3 selftest.py    # opens Calculator and computes 7+5=12 by clicking via AT
 
 ## Roadmap
 
-- **Now:** Gemini + OpenAI pivot, Linux, bring-your-own-key.
-- **Next:** AWS Nova Sonic adapter; PumpMe/local brains via a Pipecat STT+LLM+TTS
-  pipeline (text models wrapped into voice); openWakeWord "Hey Windy" gate (zero idle
-  cost); a settings UI + downloadable packaged app (Electron, matching Windy Word).
-- **Later:** cross-platform hands (macOS `agent-desktop`, Windows UIAutomation).
+- **Done:** local Veron-5090 brain (free); provider pivot (local / Gemini / OpenAI);
+  desktop face app; "Hey Jarvis" wake word; GNOME double-click launcher.
+- **Next — boardroom portability:** the launcher makes it double-click *on a set-up
+  machine*, but a truly portable installer (Bill's laptop, etc.) needs the Python
+  client to be self-contained — bundle Python + deps (ydotool, AT-SPI, flameshot) and
+  the Veron connection into one artifact (AppImage/installer). That's the real
+  packaging project; the Electron shell alone can't carry those system deps.
+- **Later:** AWS Nova Sonic adapter; cross-platform hands (macOS `agent-desktop`,
+  Windows UIAutomation); custom "Hey Windy" wake model (needs training vs the stock
+  "Hey Jarvis").

@@ -26,7 +26,7 @@ def _dispatch(name, args):
     return agent.call_tool(name, args)
 
 
-async def main(provider_name, use_ui=False):
+async def main(provider_name, use_ui=False, use_wake=False):
     brain = providers.get(provider_name)
     ok, why = brain.ready
     if not ok:
@@ -34,7 +34,22 @@ async def main(provider_name, use_ui=False):
 
     mic = audio.Mic(brain.input_rate, config.CHUNK_MS)
     speaker = audio.Speaker(brain.output_rate)
-    st = {"stop": False, "connected": False, "thinking": False}
+    st = {"stop": False, "connected": False, "thinking": False, "awake": not use_wake}
+
+    if use_wake:
+        from wake import WakeGate
+
+        def on_wake(a):
+            st["awake"] = a
+            if a:
+                st["thinking"] = False
+            print(f"  \033[36m{'🎙  awake — listening' if a else '😴  waiting for “Hey Jarvis”'}\033[0m")
+        gate = WakeGate(speaker=speaker, on_state=on_wake)
+        _orig_read = mic.read
+
+        async def _gated_read():
+            return gate.process(await _orig_read())
+        mic.read = _gated_read
 
     bridge = None
     if use_ui:
@@ -70,7 +85,8 @@ async def main(provider_name, use_ui=False):
             state = ("offline" if not st["connected"] else
                      "paused" if mic.paused else
                      "speaking" if speaker.speaking else
-                     "thinking" if st["thinking"] else "listening")
+                     "thinking" if st["thinking"] else
+                     "waiting" if not st["awake"] else "listening")
             if state != cur:
                 bridge.status(state); cur = state
             if speaker.speaking:
@@ -115,11 +131,12 @@ if __name__ == "__main__":
     ap.add_argument("--provider", default=config.PROVIDER,
                     help=f"brain to use ({', '.join(providers.names())})")
     ap.add_argument("--ui", action="store_true", help="serve the Electron face bridge on :8770")
+    ap.add_argument("--wake", action="store_true", help="hands-free: wait for 'Hey Jarvis'")
     ap.add_argument("--list", action="store_true", help="list providers and readiness")
     a = ap.parse_args()
     if a.list:
         _list(); sys.exit(0)
     try:
-        asyncio.run(main(a.provider, use_ui=a.ui))
+        asyncio.run(main(a.provider, use_ui=a.ui, use_wake=a.wake or config.WAKE))
     except KeyboardInterrupt:
         pass
