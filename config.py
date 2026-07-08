@@ -22,17 +22,22 @@ def _load_dotenv():
 _load_dotenv()
 
 # --- Brain (voice model) -----------------------------------------------------
+# Which brain to start with. Any key in providers.REGISTRY: "gemini", "openai", ...
+PROVIDER = os.environ.get("JARVIS_PROVIDER", "gemini")
+
+# OpenAI Realtime
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-# gpt-realtime-2.1-mini = cheap ($10/$20 per 1M audio) reasoning voice model.
-# Swap to "gpt-realtime-2.1" for top quality, or "gpt-realtime" for the GA stable alias.
-MODEL = os.environ.get("JARVIS_MODEL", "gpt-realtime-2.1-mini")
-VOICE = os.environ.get("JARVIS_VOICE", "cedar")  # cedar/marin/alloy/echo/shimmer...
+OPENAI_MODEL = os.environ.get("JARVIS_OPENAI_MODEL", "gpt-realtime-2.1-mini")
+OPENAI_VOICE = os.environ.get("JARVIS_OPENAI_VOICE", "cedar")
+
+# Google Gemini Live (free key: https://aistudio.google.com/apikey)
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "") or os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.environ.get("JARVIS_GEMINI_MODEL", "gemini-2.5-flash-native-audio-preview-12-2025")
+GEMINI_VOICE = os.environ.get("JARVIS_GEMINI_VOICE", "Puck")
 
 # --- Audio -------------------------------------------------------------------
-SAMPLE_RATE = 24000        # OpenAI Realtime uses 24 kHz mono pcm16 both directions
 CHANNELS = 1
-CHUNK_MS = 40              # mic frame size sent to the API
-CHUNK_FRAMES = SAMPLE_RATE * CHUNK_MS // 1000
+CHUNK_MS = 40             # mic frame size (ms) streamed to the brain
 
 # --- Hands (Linux desktop control) ------------------------------------------
 YDOTOOL_SOCKET = os.environ.get("YDOTOOL_SOCKET", f"/run/user/{os.getuid()}/.ydotool_socket")

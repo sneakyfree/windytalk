@@ -1,6 +1,6 @@
 # Windy Jarvis
 
-Always-on, hands-free, interruptible **voice control of this Fedora desktop** — the
+Always-on, hands-free, interruptible **voice control of the Linux desktop** — the
 Linux answer to the "GPT Realtime 2 Jarvis" demos (which were macOS-only). You talk;
 Windy hears you, talks back, and actually operates the machine: opens apps, searches
 the web, types, presses keys, clicks UI elements, reads the screen, runs commands.
@@ -8,14 +8,21 @@ the web, types, presses keys, clicks UI elements, reads the screen, runs command
 No start/stop dictation. It listens continuously, you can talk over it, and there's no
 copy-paste round trip — the voice model calls desktop tools directly.
 
+**Bring any brain.** Windy Jarvis is provider-pluggable: pivot between Google Gemini
+Live, OpenAI Realtime, and (coming) AWS Nova Sonic, your own PumpMe GPU cloud, and
+fully-local models — same voice, same hands, one flag. You supply the key(s) for
+whichever you want.
+
 ## Architecture
 
 ```
-  microphone ─▶ OpenAI Realtime API (gpt-realtime-2.1-mini)   ← the "brain"
-                speech-to-speech · server VAD · barge-in · tool calling
-                        │  (function calls)
+  microphone ─▶  BRAIN (swappable, providers/)                 ← speech-to-speech
+                 ├─ gemini   Google Gemini Live  (free tier)      VAD · barge-in · tools
+                 ├─ openai   OpenAI Realtime      (gpt-realtime-2.1-mini)
+                 └─ …aws / pumpme / local (roadmap)
+                        │  (function calls, provider-agnostic)
                         ▼
-                    agent.py  ── tool schemas + dispatch
+                    agent.py  ── 12 tools + dispatch
                         │
                         ▼
                      hands.py  ── the Linux "hands"
@@ -28,13 +35,20 @@ copy-paste round trip — the voice model calls desktop tools directly.
                   speaker ◀─ Windy's spoken reply
 ```
 
+`audio.py` (mic + interruptible playback) and `hands.py` never change when you swap
+brains. A brain is one file in `providers/` implementing the `Brain` interface in
+`providers/base.py`; register it in `providers/__init__.py` and it's selectable.
+
 ## Setup
 
-1. `cp .env.example .env` and put your OpenAI key in it.
-2. `./run.sh`
+1. `cp .env.example .env`
+2. Put a key in it — Gemini is free: get one at https://aistudio.google.com/apikey
+3. `./run.sh`                     # or `./run.sh --provider openai`
 
-That's it — deps (aiohttp, PyAudio, numpy, PyGObject, ydotool, flameshot) are already
-on Windy 0. `run.sh` starts the ydotool daemon, enables AT-SPI, and launches.
+Check readiness anytime: `python3 jarvis.py --list`
+
+Deps (aiohttp, google-genai, PyAudio, PyGObject, ydotool, flameshot) are already on
+Windy 0. `run.sh` starts the ydotool daemon, enables AT-SPI, and launches.
 
 ## Try saying
 
@@ -47,24 +61,29 @@ on Windy 0. `run.sh` starts the ydotool daemon, enables AT-SPI, and launches.
 ## Verify the hands without a key or mic
 
 ```
-python3 selftest.py                          # safe: read/launch/screenshot/mouse
-JARVIS_SELFTEST_TYPING=1 python3 selftest.py # also types into a text editor
+python3 selftest.py    # opens Calculator and computes 7+5=12 by clicking via AT-SPI
 ```
 
-## Notes / knobs
+## Provider notes
 
-- **Cost:** `gpt-realtime-2.1-mini` ≈ $10/$20 per 1M audio in/out (~1–3¢ per command).
-  Streaming the mic continuously bills input while listening — a wake-word gate
-  (openWakeWord) is the planned Phase-2 add to make idle cost zero.
-- **Session cap:** OpenAI Realtime sessions max out at 60 min; `jarvis.py` auto-reconnects.
-- **Swap the brain:** set `JARVIS_MODEL=gpt-realtime-2.1` for best quality, or point
-  `WS_URL`/session config at Google Gemini Live (free tier) — see the research memo.
+| Brain | Native S2S | Cost | Key |
+|-------|-----------|------|-----|
+| **gemini** | yes | free tier, then ~$0.30/hr in + $1.08/hr out | aistudio.google.com/apikey |
+| **openai** | yes | ~1–3¢/command (gpt-realtime-2.1-mini) | platform.openai.com/api-keys |
+| aws (roadmap) | yes | ~$0.85/hr | Bedrock (Nova 2 Sonic) |
+| pumpme / local (roadmap) | no → chained STT+LLM+TTS via Pipecat | $0/hr | your GPU |
+
+- Gemini wants 16 kHz mic in / 24 kHz out; OpenAI uses 24 kHz both ways. `audio.py`
+  opens the mic/speaker at whatever the selected brain declares — no manual config.
+- OpenAI Realtime caps sessions at 60 min; the main loop auto-reconnects.
 - **Safety:** `run_shell` blocks destructive patterns unless `JARVIS_ALLOW_DANGEROUS=1`.
 - **Electron/Chromium apps** expose empty accessibility trees unless launched with
-  `ACCESSIBILITY_ENABLED=1` — `read_screen`/`click_element` won't see inside them otherwise.
+  `ACCESSIBILITY_ENABLED=1`.
 
 ## Roadmap
 
-- **Phase 2:** openWakeWord "Hey Windy" gate (zero idle cost) + push-to-talk toggle.
-- **Phase 1.5:** optional `agent-sh/computer-use-linux` MCP for richer semantic control.
-- **Phase 3:** fully-local brain (Kyutai Unmute / Pipecat) on the PumpMe GPU box, $0/hr.
+- **Now:** Gemini + OpenAI pivot, Linux, bring-your-own-key.
+- **Next:** AWS Nova Sonic adapter; PumpMe/local brains via a Pipecat STT+LLM+TTS
+  pipeline (text models wrapped into voice); openWakeWord "Hey Windy" gate (zero idle
+  cost); a settings UI + downloadable packaged app (Electron, matching Windy Word).
+- **Later:** cross-platform hands (macOS `agent-desktop`, Windows UIAutomation).
