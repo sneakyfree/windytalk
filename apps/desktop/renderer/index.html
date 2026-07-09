@@ -1,0 +1,80 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Windy Talk</title>
+<style>
+  :root{
+    --bg1:#0d1524; --bg2:#0a0f1a; --ink:#e7f0ff; --dim:#7d8ba3;
+    --cyan:#35d0ff; --amber:#ffb020; --green:#34e29b; --slate:#6b7a8f; --off:#5a5f66;
+    --wait:#4f8fb0; --lock:#ff5a6a;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;}
+  html,body{background:transparent;overflow:hidden;user-select:none;}
+  #box{width:340px;height:500px;border-radius:26px;position:relative;
+    background:radial-gradient(120% 90% at 50% 0%,var(--bg1),var(--bg2));
+    border:1px solid rgba(120,160,220,.14);
+    box-shadow:0 24px 60px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.05);
+    display:flex;flex-direction:column;align-items:center;}
+  #bar{width:100%;height:34px;-webkit-app-region:drag;display:flex;align-items:center;
+    justify-content:space-between;padding:0 14px;}
+  #title{font-size:11px;letter-spacing:.14em;color:var(--dim);text-transform:uppercase;}
+  #x{-webkit-app-region:no-drag;cursor:pointer;color:var(--dim);font-size:15px;line-height:1;
+    width:22px;height:22px;border-radius:6px;display:grid;place-items:center;}
+  #x:hover{background:rgba(255,255,255,.06);color:var(--ink);}
+  #stage{width:240px;height:240px;margin-top:2px;}
+  #statusRow{display:flex;align-items:center;gap:8px;margin-top:6px;height:22px;}
+  #dot{width:9px;height:9px;border-radius:50%;background:var(--off);
+    box-shadow:0 0 10px currentColor;color:var(--off);transition:all .25s;}
+  #state{font-size:13px;letter-spacing:.03em;color:var(--ink);font-weight:600;}
+  #caption{height:34px;margin-top:2px;padding:0 26px;text-align:center;font-size:12px;
+    line-height:1.35;color:var(--dim);overflow:hidden;transition:color .2s;}
+  #btn{-webkit-app-region:no-drag;margin-top:6px;width:96px;height:96px;border-radius:50%;
+    cursor:pointer;border:none;position:relative;background:transparent;outline:none;}
+  #ring{position:absolute;inset:0;border-radius:50%;border:2px solid var(--slate);transition:all .25s;}
+  #core{position:absolute;inset:10px;border-radius:50%;display:grid;place-items:center;
+    background:radial-gradient(90% 90% at 50% 30%,#18314a,#0e1c2c);
+    box-shadow:inset 0 2px 6px rgba(0,0,0,.5);transition:all .2s;}
+  #core svg{width:38px;height:38px;fill:none;stroke:var(--slate);stroke-width:2.2;
+    stroke-linecap:round;stroke-linejoin:round;transition:stroke .2s;}
+  #btnLabel{margin-top:8px;font-size:10px;letter-spacing:.22em;color:var(--dim);text-transform:uppercase;}
+  #edge{position:absolute;bottom:14px;font-size:10px;letter-spacing:.1em;color:var(--dim);
+    display:flex;align-items:center;gap:6px;}
+  #edot{width:6px;height:6px;border-radius:50%;background:var(--off);box-shadow:0 0 8px currentColor;color:var(--off);}
+  .on #ring{border-color:var(--cyan);box-shadow:0 0 22px rgba(53,208,255,.45);}
+  .on #core svg{stroke:var(--cyan);}
+</style>
+</head>
+<body>
+<div id="box">
+  <div id="bar"><div id="title">Windy Talk</div><div id="x" onclick="window.close&&window.close()">✕</div></div>
+  <canvas id="stage" width="240" height="240"></canvas>
+  <div id="statusRow"><div id="dot"></div><div id="state">Starting…</div></div>
+  <div id="caption"></div>
+  <button id="btn"><div id="ring"></div>
+    <div id="core"><svg viewBox="0 0 24 24">
+      <path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/>
+      <path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></div>
+  </button>
+  <div id="btnLabel">Tap to talk</div>
+  <div id="edge"><span id="edot"></span><span id="etext">connecting…</span></div>
+</div>
+<script src="face.js"></script>
+<script type="module">
+  // Wire the tested VoiceClient (compiled to ../dist/src/renderer.js). The demo
+  // override renders a state without a live engine, for screenshots:
+  //   index.html?demo=speaking|thinking|listening|paused|offline|locked
+  const demo = new URLSearchParams(location.search).get("demo");
+  if (demo) {
+    window.face.setConnected(demo !== "offline");
+    window.face.setState(demo);
+    if (demo === "speaking") { window.face.setLevel(0.6); window.face.setCaption("Opening the calculator.", "say"); }
+    else if (demo === "listening") window.face.setCaption('"open the calculator"', "heard");
+  } else {
+    const mod = await import("../dist/src/renderer.js");
+    window.windyTalkStart && window.windyTalkStart();
+    document.getElementById("btn").onclick = () => window.__toggleMic && window.__toggleMic();
+  }
+</script>
+</body>
+</html>

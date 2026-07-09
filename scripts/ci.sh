@@ -15,4 +15,11 @@ echo "== tsc --noEmit (typecheck TS clients) =="
 npx --yes -p typescript tsc --noEmit -p apps/desktop
 npx --yes -p typescript tsc --noEmit -p apps/cli
 
+echo "== client protocol tests (apps/desktop) =="
+if [ -d apps/desktop/node_modules ]; then
+  ( cd apps/desktop && npm test --silent )
+else
+  echo "  (skipped — run 'npm install' in apps/desktop; CI installs deps)"
+fi
+
 echo "== CI GREEN =="

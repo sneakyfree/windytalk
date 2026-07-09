@@ -4,6 +4,7 @@ __pycache__/
 /tmp/
 node_modules/
 package-lock.json
+dist/
 # reference prototype artifacts (read-only port source)
 reference/server/*.onnx
 reference/server/*.bin
