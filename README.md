@@ -1,4 +1,7 @@
-# Windy Jarvis
+# Windy Talk
+
+*The voice of the Windy ecosystem — talk to your agent, hands-free, and it acts.*
+
 
 Always-on, hands-free, interruptible **voice control of the Linux desktop** — the
 Linux answer to the "GPT Realtime 2 Jarvis" demos (which were macOS-only). You talk;
@@ -8,7 +11,7 @@ the web, types, presses keys, clicks UI elements, reads the screen, runs command
 No start/stop dictation. It listens continuously, you can talk over it, and there's no
 copy-paste round trip — the voice model calls desktop tools directly.
 
-**Bring any brain.** Windy Jarvis is provider-pluggable: pivot between Google Gemini
+**Bring any brain.** Windy Talk is provider-pluggable: pivot between Google Gemini
 Live, OpenAI Realtime, and (coming) AWS Nova Sonic, your own PumpMe GPU cloud, and
 fully-local models — same voice, same hands, one flag. You supply the key(s) for
 whichever you want.
@@ -75,7 +78,7 @@ mouth lip-syncs to the reply), a big mic on/off button, and status lights
 (listening / thinking / speaking / waiting / offline, plus a "Veron online" dot).
 
 ```
-bash scripts/install-launcher.sh    # adds "Windy Jarvis" to the GNOME app grid
+bash scripts/install-launcher.sh    # adds "Windy Talk" to the GNOME app grid
 gtk-launch windy-jarvis             # or just double-click it in Activities
 # dev: cd desktop && npm install && npm start
 ```

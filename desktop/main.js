@@ -1,4 +1,4 @@
-// Windy Jarvis desktop shell — a thin Electron window over the Python voice agent.
+// Windy Talk desktop shell — a thin Electron window over the Python voice agent.
 // It spawns the agent (run.sh --ui), shows the face/button/status, and cleans up on quit.
 const { app, BrowserWindow } = require('electron');
 const { spawn } = require('child_process');
@@ -27,7 +27,7 @@ function stopAgent() {
 function createWindow() {
   const win = new BrowserWindow({
     width: 340, height: 500, frame: false, transparent: true, resizable: false,
-    hasShadow: true, backgroundColor: '#00000000', title: 'Windy Jarvis',
+    hasShadow: true, backgroundColor: '#00000000', title: 'Windy Talk',
     webPreferences: { contextIsolation: true },
   });
   win.loadFile(path.join(__dirname, 'index.html'));
