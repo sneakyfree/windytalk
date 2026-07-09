@@ -2,7 +2,8 @@
 __pycache__/
 *.pyc
 /tmp/
-server/*.onnx
-server/*.bin
-desktop/node_modules/
-desktop/package-lock.json
+node_modules/
+package-lock.json
+# reference prototype artifacts (read-only port source)
+reference/server/*.onnx
+reference/server/*.bin
