@@ -17,6 +17,7 @@ import time
 
 import websockets
 
+from auth.eternitas import Authorizer, get_authorizer
 from engine.session import VoiceSession
 
 try:
@@ -86,10 +87,12 @@ def parse_frame(buf: bytes):
 class _Conn:
     """Per-connection wire state: a session + the outbound serializer."""
 
-    def __init__(self, ws, session: VoiceSession, session_id: str = "", model: str = ""):
+    def __init__(self, ws, session: VoiceSession, session_id: str = "",
+                 model: str = "", actor_id: str = ""):
         self.ws = ws
         self.session = session
         self.session_id = session_id
+        self.actor_id = actor_id or session_id
         self.model = model
         self.seq_out = 0
         self.min_rtt = float("inf")
@@ -130,23 +133,25 @@ class _Conn:
                 lat = ({"eos_to_first_audio_p90": round(self.eos_to_first_audio_ms, 1)}
                        if self.eos_to_first_audio_ms is not None else None)
                 emit_telemetry("turn.complete", actor_type="human",
-                               actor_id=self.session_id, session_id=self.session_id, model=self.model or None,
+                               actor_id=self.actor_id, session_id=self.session_id, model=self.model or None,
                                latency_ms=lat)
             self._prev_state = value
         elif etype == "tool_call":
             emit_telemetry("tool.invoked", actor_type="agent",
-                           actor_id=self.session_id, session_id=self.session_id, tool=e.get("tool"))
+                           actor_id=self.actor_id, session_id=self.session_id, tool=e.get("tool"))
         elif etype == "say_cancel" and e.get("reason") == "barge_in":
-            emit_telemetry("say.barge_in", actor_type="human", actor_id=self.session_id, session_id=self.session_id)
+            emit_telemetry("say.barge_in", actor_type="human", actor_id=self.actor_id, session_id=self.session_id)
 
 
 class VoiceServer:
     def __init__(self, make_providers, *, pace: bool = True,
-                 system_prompt: str | None = None, tools: list[dict] | None = None):
+                 system_prompt: str | None = None, tools: list[dict] | None = None,
+                 authorizer: Authorizer | None = None):
         self.make_providers = make_providers
         self.pace = pace
         self.system_prompt = system_prompt
         self.tools = tools
+        self.authorizer = authorizer or get_authorizer()
 
     async def handle(self, ws) -> None:
         # 1) hello → ready
@@ -171,18 +176,26 @@ class VoiceServer:
                                       "message": f"need {PROTOCOL}", "fatal": True}))
             return
 
+        # §10 entitlement gate — deny is a fatal not_entitled (§9). Default
+        # DevAuthorizer allows all; WINDYTALK_STRICT_AUTH=1 flips to Eternitas.
+        ent = self.authorizer.authorize(hello.get("auth"))
+        if not ent.entitled:
+            await ws.send(json.dumps({"type": "error", "code": "not_entitled",
+                                      "message": ent.reason, "fatal": True}))
+            return
+
         session_id = hello.get("session_id") or f"s-{now_ms()}"
         loop = asyncio.get_running_loop()
         stt, tts, brain = self.make_providers()
         model = getattr(brain, "model", "") or ""
-        conn = _Conn(ws, None, session_id=session_id, model=model)
+        conn = _Conn(ws, None, session_id=session_id, model=model, actor_id=ent.user_id)
         session = VoiceSession(stt, tts, brain, conn.emit, session_id=session_id,
                                system_prompt=self.system_prompt, tools=self.tools,
                                pace=self.pace, loop=loop)
         conn.session = session
         t_session_start = time.perf_counter()
         meta = _session_metadata(hello)
-        emit_telemetry("session.start", actor_type="human", actor_id=session_id,
+        emit_telemetry("session.start", actor_type="human", actor_id=ent.user_id,
                        session_id=session_id, model=model or None, metadata=meta)
 
         await ws.send(json.dumps({
@@ -201,7 +214,7 @@ class VoiceServer:
         finally:
             ping_task.cancel()
             await session._cancel_turn(reason=None)
-            emit_telemetry("session.end", actor_type="human", actor_id=session_id,
+            emit_telemetry("session.end", actor_type="human", actor_id=ent.user_id,
                            session_id=session_id,
                            dur_ms=int((time.perf_counter() - t_session_start) * 1000),
                            turns=conn.turns, model=model or None,
