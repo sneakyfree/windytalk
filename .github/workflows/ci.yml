@@ -1,0 +1,40 @@
+name: CI
+
+# NOTE: GitHub Actions is billing-locked account-wide on sneakyfree (since
+# ~2026-07-04), so this workflow does not execute yet. Until the lock clears the
+# merge gate is a green LOCAL run of `scripts/ci.sh`, which runs the same
+# commands. Keep the two in lockstep.
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install tooling
+        # Engine runtime deps (faster-whisper/kokoro/CUDA) are NOT installed:
+        # provider concretes import them lazily, so unit tests run GPU-free.
+        run: pip install ruff pytest jsonschema numpy
+      - name: Lint (ruff)
+        run: ruff check engine telemetry tests
+      - name: Unit tests (pytest)
+        run: python -m pytest tests/ -q
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Typecheck TS clients
+        run: |
+          npx --yes -p typescript tsc --noEmit -p apps/desktop
+          npx --yes -p typescript tsc --noEmit -p apps/cli

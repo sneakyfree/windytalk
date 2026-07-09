@@ -6,11 +6,10 @@ pure logic (VAD endpointing, §10 segmentation, §0.1 budget)."""
 import pytest
 
 from engine.latency import BUDGET_MS, LatencyLog
+from engine.providers.stt import STTProvider, get_stt
+from engine.providers.tts import TTSProvider, get_tts
 from engine.segment import first_segment, segment_stream
 from engine.vad import FRAME_BYTES, Segmenter
-from engine.providers.stt import STTProvider, Transcript, get_stt
-from engine.providers.tts import TTSProvider, get_tts
-
 
 # ---------- provider ABCs + registries ----------
 

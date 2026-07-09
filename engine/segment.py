@@ -12,7 +12,7 @@ will drive from brain tokens.
 from __future__ import annotations
 
 import re
-from typing import Iterable, Iterator
+from collections.abc import Iterable, Iterator
 
 _BOUNDARY = re.compile(r"[.!?:\n]")
 _WORD = re.compile(r"\S+")
