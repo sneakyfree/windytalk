@@ -13,7 +13,7 @@ testable without the C extension.
 """
 from __future__ import annotations
 
-from typing import Callable, Iterator
+from collections.abc import Callable, Iterator
 
 MIC_RATE = 16000               # voice-session.v1 §3
 FRAME_MS = 20                  # voice-session.v1 §3 (20 ms mic frames)

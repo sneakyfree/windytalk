@@ -1,0 +1,22 @@
+[project]
+name = "windytalk-engine"
+version = "0.1.0"
+description = "Windy Talk — the universal voice layer for AI agents (Python engine + seams)"
+requires-python = ">=3.11"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+# The prototype is the archived port source — never linted, never built on.
+extend-exclude = ["reference"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+# E501 (line length): long contract-referencing comments shouldn't fail CI.
+# B027: `warmup()` is a deliberate optional lifecycle hook on the provider ABCs
+#       (default no-op, concretes override) — not a forgotten @abstractmethod.
+ignore = ["E501", "B027"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

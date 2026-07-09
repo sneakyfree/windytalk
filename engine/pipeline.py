@@ -24,9 +24,9 @@ import wave
 import numpy as np
 
 from engine.latency import LatencyLog
-from engine.segment import first_segment, segment_stream
 from engine.providers.stt import MIC_RATE, get_stt
 from engine.providers.tts import TTS_RATE, get_tts
+from engine.segment import first_segment, segment_stream
 
 
 def echo_brain(text: str) -> str:
