@@ -116,3 +116,35 @@ class WindyFlyAgent:
 def strip_banner(text: str) -> str:
     """Remove a leading `[🪰 Windy Fly · … ]` status banner if present."""
     return _BANNER.sub("", text or "", count=1).lstrip("\n")
+
+
+class WindyFlyBrain:
+    """Adapts a WindyFlyAgent to the brains.BrainProvider interface so the voice
+    session can drive the Windy Fly agent or a raw Mind model through one path.
+
+    The agent handles its own tools internally (it is a chat responder), so this
+    brain never emits tool_calls — it yields the reply as text events, one per
+    sentence segment (already §10-chunked by respond_segments)."""
+
+    name = "windyfly"
+
+    def __init__(self, agent: WindyFlyAgent | None = None) -> None:
+        self.agent = agent or WindyFlyAgent()
+
+    def stream(self, messages, tools=None, model=None):
+        # BrainEvent is imported lazily to keep agents/ decoupled from brains/ at
+        # import time (the session wires them together).
+        from brains.base import BrainEvent
+        user_text = ""
+        for m in reversed(messages or []):
+            if m.get("role") == "user":
+                user_text = m.get("content", "")
+                break
+        session_id = (messages[0].get("session_id") if messages else None) or ""
+        try:
+            for seg in self.agent.respond_segments(user_text, session_id):
+                yield BrainEvent(kind="text", text=seg + " ")
+        except WindyFlyError as e:
+            yield BrainEvent(kind="error", message=str(e))
+            return
+        yield BrainEvent(kind="done", finish_reason="stop")
