@@ -32,6 +32,12 @@ def _runon_pos(buf: str) -> int | None:
     return None
 
 
+def cut_point(buf: str) -> int | None:
+    """Public alias: index just past the next §10 cut in `buf`, or None. Used by
+    the session loop to segment brain text incrementally as deltas arrive."""
+    return _cut_point(buf)
+
+
 def _cut_point(buf: str) -> int | None:
     """Return the index just past a qualifying cut, or None if none yet.
 

@@ -7,3 +7,4 @@ package-lock.json
 # reference prototype artifacts (read-only port source)
 reference/server/*.onnx
 reference/server/*.bin
+scratch/
