@@ -1,7 +1,7 @@
 # ADR-058 — Windy Talk: Platform 14, the universal voice layer
 
 **Status:** ✅ Decided 2026-07-08. Vision blessed by Grant in a multi-session strategy summit; this ADR records the locked foundation so the build begins with the end in mind.
-**Amended 2026-07-08 (verification pass):** D1 route corrected to the live `POST /v1/chat` (the originally cited `/v1/chat/completions` 404s against the deployed Mind API); D3 bridge path corrected to `src/windyfly/bridge/uds_server.py`; a Mind-side `/v1/chat/completions` alias is proposed so off-the-shelf OpenAI SDKs plug in unchanged (the Switzerland promise made literal).
+**Amended 2026-07-08 (verification pass):** D1 route corrected to the live `POST /v1/chat` (the originally cited `/v1/chat/completions` 404s against the deployed Mind API); D3 bridge path corrected to `src/windyfly/bridge/uds_server.py`; a Mind-side `/v1/chat/completions` alias was shipped the same day (windy-mind PR #56) so off-the-shelf OpenAI SDKs plug in unchanged (the Switzerland promise made literal).
 **Amends:** ADR-010 (Vision-Aligned Engineering Invariants) — promotes the platform count from 13 to **14** (§2) and extends the "voice as universal API" invariant (§5) from *Windy-internal* to *agent-agnostic*.
 **Sibling:** ADR-044 (Windy Call — voice provider abstraction). Windy Call is telephony voice (Platform 9); Windy Talk is computer/desktop voice. Same VoiceProvider discipline, different transport.
 **Owner:** Grant (vision); engineering (execution).
@@ -31,7 +31,7 @@ Windy Talk is also the *productization of a promise ADR-010 already made*: §3�
 
 ## §3 — Foundation decisions (locked)
 
-**D1 — Brain routes through Windy Mind.** Per ADR-010 §8, every LLM call goes through Windy Mind's OpenAI-compatible chat endpoint — **live route: `POST api.windymind.ai/v1/chat`** (OpenAI-compatible request/response shape, SSE streaming via `stream:true`; verified against the deployed API 2026-07-08 — `/v1/chat/completions` 404s until the proposed alias ships). Mind *is* the BYOM/Switzerland layer; Windy Talk never calls a provider directly. The user's "use my own account / local / Chinese model" choice is satisfied by Mind, not by Windy Talk.
+**D1 — Brain routes through Windy Mind.** Per ADR-010 §8, every LLM call goes through Windy Mind's OpenAI-compatible chat endpoint — **live route: `POST api.windymind.ai/v1/chat`** (OpenAI-compatible request/response shape, SSE streaming via `stream:true`; verified against the deployed API 2026-07-08). The `/v1/chat/completions` alias is **live** (windy-mind PR #56, deployed 2026-07-08) so off-the-shelf OpenAI SDKs plug in unchanged. Mind *is* the BYOM/Switzerland layer; Windy Talk never calls a provider directly. The user's "use my own account / local / Chinese model" choice is satisfied by Mind, not by Windy Talk.
 
 **D2 — Agents pair through Windy Connect.** Do not rebuild agent onboarding. Windy Connect (`windy-connect`) already pairs any runtime — OpenClaw, Hermes, Claude Code, generic — with Mail, Chat, Mind, and Eternitas. Windy Talk pairs the agent through Connect, then adds voice + hands on top.
 

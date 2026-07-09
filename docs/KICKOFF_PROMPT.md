@@ -22,14 +22,20 @@ Before writing a single line of code, read these in order (all on this machine):
 
 Facts verified live on 2026-07-08 (already folded into the genome — trust these
 over any stale text you encounter elsewhere):
-- Windy Mind's chat route is POST api.windymind.ai/v1/chat (OpenAI-compatible
-  SHAPE, SSE via stream:true). /v1/chat/completions 404s until the alias ships.
+- Windy Mind's chat route is POST api.windymind.ai/v1/chat (OpenAI-compatible,
+  SSE via stream:true). The /v1/chat/completions alias is ALSO live (deployed
+  2026-07-08), so OpenAI SDKs pointed at base_url .../v1 work unchanged.
   Auth is required (401 bare); mint a dev key via POST /admin/keys (lockbox creds).
 - windy-connect is NOT on this machine: `pip install windy-connect` (0.3.1) or
   clone sneakyfree/windy-connect.
 - The Windy Fly bridge lives at src/windyfly/bridge/uds_server.py in
   sneakyfree/windy-agent (local clone: ~/Desktop/Grant's Folder/windy-agent).
 - The telemetry ingest admin.windyword.ai is up.
+- ⚠ GitHub Actions is BILLING-LOCKED account-wide on sneakyfree (since ~Jul 4;
+  every workflow refuses to start). Until Grant unlocks it: run lint/typecheck/
+  tests LOCALLY as the merge gate (Task 0.6's CI config still gets written —
+  it just won't execute yet), and treat "green CI" in the plan as "green local
+  run of the same commands."
 
 How you work (from the plan's prime directives):
 - Task 0.0 FIRST: finish the authed dependency reality-check and write
