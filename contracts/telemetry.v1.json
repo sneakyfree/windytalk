@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://windytalk.com/contracts/telemetry.v1.json",
-  "$comment": "telemetry.v1 — FROZEN 2026-07-09. Schema for the body of POST https://admin.windyword.ai/v1/events (per-emitter bearer token). Field names match the LIVE ingest as probed in docs/PROBE_RESULTS.md (the ingest's required trio is service/event_type/actor_type; the genome's earlier sketch's 'event' field is event_type here). CONTENT-FREE BY CONSTRUCTION: additionalProperties:false everywhere and no free-text fields — ids, enums, timestamps, and numbers only. A payload carrying 'transcript', 'message', or any other unlisted key is schema-invalid (the live ingest 422s the same way). Emitted fire-and-forget by telemetry/emit.py (ADR-WA-001): async, ≤200ms, swallows all errors, no-op unless configured. Change control per contracts/README.md.",
+  "$comment": "telemetry.v1 — FROZEN 2026-07-09. Schema for the body of POST https://admin.windyword.ai/v1/events (per-emitter bearer token). Field names match the LIVE ingest as probed in docs/PROBE_RESULTS.md and re-probed during Task 0.4 (the ingest requires service/event_type/actor_type AND ts — the ts requirement surfaced only when a ts-less event 422'd on 2026-07-09; the genome's earlier sketch's 'event' field is event_type here). CONTENT-FREE BY CONSTRUCTION: additionalProperties:false everywhere and no free-text fields — ids, enums, timestamps, and numbers only. A payload carrying 'transcript', 'message', or any other unlisted key is schema-invalid (the live ingest 422s the same way). Emitted fire-and-forget by telemetry/emit.py (ADR-WA-001): async, ≤200ms, swallows all errors, no-op unless configured. Change control per contracts/README.md.",
   "title": "Windy Talk telemetry event batch",
   "type": "object",
   "properties": {
@@ -65,7 +65,7 @@
         "error_code": { "$ref": "#/$defs/id64", "$comment": "A code (e.g. voice-session.v1 §9 codes), never a message string." },
         "region": { "type": "string", "maxLength": 16, "$comment": "Coarse only (country/region code) — granularity is a Grant privacy call (ADR-058 D10)." }
       },
-      "required": ["service", "platform", "event_type", "actor_type", "session_id"],
+      "required": ["service", "platform", "event_type", "actor_type", "session_id", "ts"],
       "additionalProperties": false
     }
   }

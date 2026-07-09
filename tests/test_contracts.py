@@ -55,6 +55,7 @@ def good_event(**overrides):
         "event_type": "session.end",
         "actor_type": "user",
         "session_id": "s-123",
+        "ts": "2026-07-09T05:00:00Z",
         "dur_ms": 61000,
         "turns": 14,
         "model": "llama-3.3-70b-versatile",
@@ -96,7 +97,7 @@ def test_free_text_cannot_ride_in_enum_or_id_fields():
 
 
 def test_required_ingest_trio_enforced():
-    for missing in ("service", "event_type", "actor_type", "session_id", "platform"):
+    for missing in ("service", "event_type", "actor_type", "session_id", "platform", "ts"):
         ev = good_event()
         del ev[missing]
         with pytest.raises(ValidationError):
