@@ -36,7 +36,8 @@
             "probe.task00"
           ]
         },
-        "actor_type": { "type": "string", "enum": ["user", "agent", "system"] },
+        "actor_type": { "type": "string", "enum": ["human", "agent", "system"], "$comment": "Live ingest requires human|agent|system (NOT 'user') — verified against admin.windyword.ai during Task 1.8." },
+        "actor_id": { "$ref": "#/$defs/id64", "$comment": "Required by the live ingest when actor_type is human or agent (system is exempt). Pre-1.7 this is the session id; Task 1.7 sets it to the Eternitas passport / agent id." },
         "session_id": { "$ref": "#/$defs/id64" },
         "user_id": { "$ref": "#/$defs/id64" },
         "agent_id": { "$ref": "#/$defs/id64" },
@@ -63,10 +64,31 @@
         },
         "tier_outcome": { "type": "string", "enum": ["auto", "approved", "denied"] },
         "error_code": { "$ref": "#/$defs/id64", "$comment": "A code (e.g. voice-session.v1 §9 codes), never a message string." },
-        "region": { "type": "string", "maxLength": 16, "$comment": "Coarse only (country/region code) — granularity is a Grant privacy call (ADR-058 D10)." }
+        "region": { "type": "string", "maxLength": 16, "$comment": "Coarse only (country/region code) — granularity is a Grant privacy call (ADR-058 D10)." },
+        "metadata": {
+          "type": "object",
+          "$comment": "INTEL-CONTRACT-V2 non-content descriptors. session.start requires app_version+os+install_id; session.end requires install_id (enforced live by the ingest). Whitelisted keys only — content-free.",
+          "properties": {
+            "app_version": { "type": "string", "maxLength": 32 },
+            "install_id": { "$ref": "#/$defs/id64" },
+            "os": { "type": "string", "maxLength": 32 },
+            "device": { "type": "string", "maxLength": 32 },
+            "region": { "type": "string", "maxLength": 16 },
+            "arch": { "type": "string", "maxLength": 16 },
+            "locale": { "type": "string", "maxLength": 16 }
+          },
+          "additionalProperties": false
+        }
       },
       "required": ["service", "platform", "event_type", "actor_type", "session_id", "ts"],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "$comment": "Live ingest rule: actor_id is required when the actor is human or agent.",
+          "if": { "properties": { "actor_type": { "enum": ["human", "agent"] } } },
+          "then": { "required": ["actor_id"] }
+        }
+      ]
     }
   }
 }

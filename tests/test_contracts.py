@@ -53,7 +53,8 @@ def good_event(**overrides):
         "service": "windytalk",
         "platform": "windy-talk",
         "event_type": "session.end",
-        "actor_type": "user",
+        "actor_type": "human",
+        "actor_id": "s-123",
         "session_id": "s-123",
         "ts": "2026-07-09T05:00:00Z",
         "dur_ms": 61000,
@@ -68,6 +69,17 @@ def good_event(**overrides):
 
 def test_good_batch_validates():
     validate({"events": [good_event()]}, telemetry_schema())
+
+
+def test_actor_id_required_for_human_and_agent_not_system():
+    # matches the live ingest rule (verified Task 1.8)
+    human = good_event()
+    del human["actor_id"]
+    with pytest.raises(ValidationError):
+        validate({"events": [human]}, telemetry_schema())
+    system = good_event(actor_type="system")
+    del system["actor_id"]
+    validate({"events": [system]}, telemetry_schema())  # system is exempt
 
 
 @pytest.mark.parametrize(

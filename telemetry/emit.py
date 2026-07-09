@@ -25,9 +25,15 @@ _PLATFORM = "windy-talk"
 
 # Mirrors contracts/telemetry.v1.json $defs.event — the only keys that can leave.
 _ALLOWED_FIELDS = frozenset({
-    "event_type", "actor_type", "session_id", "user_id", "agent_id", "ts",
-    "dur_ms", "turns", "model", "cost_microcents", "latency_ms", "tool",
-    "tier_outcome", "error_code", "region",
+    "event_type", "actor_type", "actor_id", "session_id", "user_id", "agent_id",
+    "ts", "dur_ms", "turns", "model", "cost_microcents", "latency_ms", "tool",
+    "tier_outcome", "error_code", "region", "metadata",
+})
+
+# metadata (INTEL-CONTRACT-V2) — non-content descriptors only; sub-keys whitelisted
+# so a caller can never smuggle content through the metadata object either.
+_ALLOWED_METADATA = frozenset({
+    "app_version", "install_id", "os", "device", "region", "arch", "locale",
 })
 
 _threads: list[threading.Thread] = []
@@ -44,7 +50,11 @@ def _config() -> tuple[str, str] | None:
 def _clean(fields: dict) -> dict:
     event = {"service": _SERVICE, "platform": _PLATFORM}
     for key, value in fields.items():
-        if key in _ALLOWED_FIELDS and value is not None:
+        if key not in _ALLOWED_FIELDS or value is None:
+            continue
+        if key == "metadata" and isinstance(value, dict):
+            event[key] = {k: v for k, v in value.items() if k in _ALLOWED_METADATA}
+        else:
             event[key] = value
     event.setdefault("actor_type", "system")
     event.setdefault("session_id", "none")
