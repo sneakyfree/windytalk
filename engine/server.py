@@ -19,12 +19,52 @@ import websockets
 
 from engine.session import VoiceSession
 
+try:
+    from telemetry.emit import emit as emit_telemetry
+    from telemetry.emit import flush as flush_telemetry
+except Exception:  # telemetry pkg absent → no-op (matches emit's inert-unless-configured)
+    def emit_telemetry(event_type: str, **fields):  # type: ignore
+        pass
+
+    def flush_telemetry(timeout_s: float = 1.0):  # type: ignore
+        pass
+
 PROTOCOL = "voice-session.v1"
+APP_VERSION = "0.1.0"
 _HEADER = struct.Struct("<BBHQI")  # type u8, flags u8, seq u16, ts_ms u64, stream_id u32 = 16
 MIC_TYPE = 0x01
 TTS_TYPE = 0x02
 FLAG_FINAL = 0x01
 SESSION_TTL_S = 60
+
+
+def _install_id() -> str:
+    """A stable per-install id for telemetry metadata (INTEL-CONTRACT-V2). Persisted
+    under ~/.windytalk/ so it survives restarts; content-free (random, no PII)."""
+    import os
+    from pathlib import Path
+    p = Path.home() / ".windytalk" / "install-id"
+    try:
+        if p.exists():
+            return p.read_text().strip()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        val = "inst-" + os.urandom(8).hex()
+        p.write_text(val)
+        return val
+    except Exception:
+        return "inst-unknown"
+
+
+def _session_metadata(hello: dict) -> dict:
+    """Non-content descriptors the ingest requires on session events. Prefer the
+    client's hello values; fall back to engine-side info."""
+    import sys
+    client = hello.get("client") or {}
+    return {
+        "app_version": str(client.get("version") or APP_VERSION),
+        "os": str(client.get("platform") or sys.platform),
+        "install_id": str(client.get("install_id") or _install_id()),
+    }
 
 
 def now_ms() -> int:
@@ -46,15 +86,19 @@ def parse_frame(buf: bytes):
 class _Conn:
     """Per-connection wire state: a session + the outbound serializer."""
 
-    def __init__(self, ws, session: VoiceSession):
+    def __init__(self, ws, session: VoiceSession, session_id: str = "", model: str = ""):
         self.ws = ws
         self.session = session
+        self.session_id = session_id
+        self.model = model
         self.seq_out = 0
         self.min_rtt = float("inf")
         self.offset = 0.0
         self._t_eos: float | None = None
         self._first_audio_seen = False
         self.eos_to_first_audio_ms: float | None = None
+        self.turns = 0
+        self._prev_state: str | None = None
 
     async def emit(self, e: dict) -> None:
         etype = e["type"]
@@ -73,7 +117,27 @@ class _Conn:
         if etype == "heard" and e.get("final"):
             self._t_eos = time.perf_counter()
             self._first_audio_seen = False
+        self._telemetry(e)
         await self.ws.send(json.dumps(e))
+
+    def _telemetry(self, e: dict) -> None:
+        # Content-free (telemetry.v1): ids/counts/latencies only — never text.
+        etype = e["type"]
+        if etype == "state":
+            value = e.get("value")
+            if value == "listening" and self._prev_state == "speaking":
+                self.turns += 1
+                lat = ({"eos_to_first_audio_p90": round(self.eos_to_first_audio_ms, 1)}
+                       if self.eos_to_first_audio_ms is not None else None)
+                emit_telemetry("turn.complete", actor_type="human",
+                               actor_id=self.session_id, session_id=self.session_id, model=self.model or None,
+                               latency_ms=lat)
+            self._prev_state = value
+        elif etype == "tool_call":
+            emit_telemetry("tool.invoked", actor_type="agent",
+                           actor_id=self.session_id, session_id=self.session_id, tool=e.get("tool"))
+        elif etype == "say_cancel" and e.get("reason") == "barge_in":
+            emit_telemetry("say.barge_in", actor_type="human", actor_id=self.session_id, session_id=self.session_id)
 
 
 class VoiceServer:
@@ -110,11 +174,16 @@ class VoiceServer:
         session_id = hello.get("session_id") or f"s-{now_ms()}"
         loop = asyncio.get_running_loop()
         stt, tts, brain = self.make_providers()
-        conn = _Conn(ws, None)
+        model = getattr(brain, "model", "") or ""
+        conn = _Conn(ws, None, session_id=session_id, model=model)
         session = VoiceSession(stt, tts, brain, conn.emit, session_id=session_id,
                                system_prompt=self.system_prompt, tools=self.tools,
                                pace=self.pace, loop=loop)
         conn.session = session
+        t_session_start = time.perf_counter()
+        meta = _session_metadata(hello)
+        emit_telemetry("session.start", actor_type="human", actor_id=session_id,
+                       session_id=session_id, model=model or None, metadata=meta)
 
         await ws.send(json.dumps({
             "type": "ready", "protocol": PROTOCOL, "session_id": session_id,
@@ -132,6 +201,12 @@ class VoiceServer:
         finally:
             ping_task.cancel()
             await session._cancel_turn(reason=None)
+            emit_telemetry("session.end", actor_type="human", actor_id=session_id,
+                           session_id=session_id,
+                           dur_ms=int((time.perf_counter() - t_session_start) * 1000),
+                           turns=conn.turns, model=model or None,
+                           metadata={"install_id": meta["install_id"]})
+            flush_telemetry(timeout_s=0.5)
 
     async def _route(self, conn: _Conn, msg) -> None:
         session = conn.session

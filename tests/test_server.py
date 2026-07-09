@@ -127,3 +127,34 @@ def test_frame_roundtrip():
     ftype, flags, seq, ts, sid, payload = parse_frame(f)
     assert (ftype, flags & FLAG_FINAL, seq, ts, sid, payload) == \
         (TTS_TYPE, FLAG_FINAL, 7, 123456789, 42, b"\xaa\xbb")
+
+
+async def test_telemetry_events_are_emitted_and_content_free(endpoint, monkeypatch):
+    import engine.server as srv
+
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(srv, "emit_telemetry", lambda et, **f: events.append((et, f)))
+    monkeypatch.setattr(srv, "flush_telemetry", lambda **k: None)
+
+    async with websockets.connect(endpoint) as ws:
+        await ws.send(json.dumps({"type": "hello", "protocol": "voice-session.v1",
+                                  "client": {"app": "t", "version": "1", "platform": "linux"}}))
+        await ws.recv()  # ready
+        await ws.send(json.dumps({"type": "mic", "on": True, "ts": 0}))
+        seq = 0
+        for pcm in [_voiced()] * 10 + [_silent()] * 36:
+            await ws.send(build_frame(MIC_TYPE, 0, seq, 0, 0, pcm))
+            seq = (seq + 1) & 0xFFFF
+        await _collect(ws, stop=_turn_ended)
+    await asyncio.sleep(0.05)
+
+    kinds = [e[0] for e in events]
+    assert "session.start" in kinds
+    assert "turn.complete" in kinds
+    assert "session.end" in kinds
+    # content-free: no text-bearing field ever passed to telemetry
+    banned = {"text", "message", "transcript", "content", "args", "prompt", "response"}
+    for _kind, fields in events:
+        assert not (banned & set(fields)), fields
+    end = next(f for k, f in events if k == "session.end")
+    assert end["turns"] >= 1 and "dur_ms" in end

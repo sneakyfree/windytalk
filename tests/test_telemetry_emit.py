@@ -36,9 +36,10 @@ def test_noop_when_unconfigured(monkeypatch):
 
 
 def test_happy_path_batch_matches_frozen_contract(captured):
-    emit_mod.emit("session.end", actor_type="user", session_id="s1",
+    emit_mod.emit("session.end", actor_type="human", actor_id="s1", session_id="s1",
                   dur_ms=1000, turns=3, model="llama-3.3-70b-versatile",
-                  latency_ms={"transport_p90": 21.0})
+                  latency_ms={"transport_p90": 21.0},
+                  metadata={"install_id": "inst-abc"})
     emit_mod.flush()
     assert len(captured) == 1
     url, token, body = captured[0]
@@ -55,6 +56,17 @@ def test_content_is_structurally_stripped(captured):
     event = body["events"][0]
     forbidden = {"transcript", "message", "text", "args", "prompt"}
     assert not (forbidden & set(event)), event
+    validate(body, CONTRACT)
+
+
+def test_metadata_subkeys_are_whitelisted(captured):
+    emit_mod.emit("session.start", actor_type="human", actor_id="s1", session_id="s1",
+                  metadata={"app_version": "0.1.0", "os": "linux", "install_id": "i",
+                            "transcript": "secret", "note": "leak"})
+    emit_mod.flush()
+    (_, _, body), = captured
+    md = body["events"][0]["metadata"]
+    assert set(md) == {"app_version", "os", "install_id"}  # non-whitelisted dropped
     validate(body, CONTRACT)
 
 
