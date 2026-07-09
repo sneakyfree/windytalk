@@ -38,3 +38,8 @@ jobs:
         run: |
           npx --yes -p typescript tsc --noEmit -p apps/desktop
           npx --yes -p typescript tsc --noEmit -p apps/cli
+      - name: Client protocol tests
+        run: |
+          cd apps/desktop
+          npm install --no-audit --no-fund
+          npm test
