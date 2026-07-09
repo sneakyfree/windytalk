@@ -1,0 +1,5 @@
+# engine/ runtime deps (the 5090 path). Model files are external — see engine/README.md.
+faster-whisper>=1.0
+kokoro-onnx>=0.4
+webrtcvad>=2.0
+numpy>=1.24
