@@ -1,0 +1,146 @@
+{
+  "$comment": "hands.mcp.v1 — FROZEN 2026-07-09. The tool surface the agent sees, exposed by hands/surface.py as both MCP tools and local HTTP (ADR-058 D4 co-tenant pattern). Tool list ported from the proven prototype (reference/agent.py, 12 tools). Every tool carries an ADR-010 §9 trust tier. Change control per contracts/README.md: additive → v1.1 via PR; breaking → v2 + tell Grant.",
+  "contract": "hands.mcp.v1",
+  "tiers": {
+    "$comment": "Enforced by hands/tiers.py at the surface, not by the client or agent. auto_allow: execute immediately. ask_first: per-invocation user confirmation required; the user MAY grant a session-scoped always-allow upgrade for the tool. always_confirm: per-invocation confirmation, no session upgrade possible. Confirmation is delivered through the active client (voice prompt or UI dialog); a denial returns ok:false error:'denied' to the agent — never silence. Tiers are per-tool in v1; per-argument escalation is a v1.1 candidate.",
+    "values": ["auto_allow", "ask_first", "always_confirm"]
+  },
+  "platform_note": "The tool list is the stable cross-OS surface. A backend that cannot implement a tool on its platform returns ok:false error:'unsupported' — the tool never disappears from the list.",
+  "tools": [
+    {
+      "name": "open_app",
+      "tier": "auto_allow",
+      "description": "Launch a desktop application by name (e.g. 'Firefox', 'terminal', 'files', 'settings').",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "name": { "type": "string", "description": "App name, .desktop id, or binary." } },
+        "required": ["name"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "web_search",
+      "tier": "auto_allow",
+      "description": "Open the web browser and search the web for a query.",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "query": { "type": "string" } },
+        "required": ["query"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "open_url",
+      "tier": "auto_allow",
+      "description": "Open a specific URL in the default browser.",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "url": { "type": "string" } },
+        "required": ["url"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "type_text",
+      "tier": "auto_allow",
+      "description": "Type text into whatever field is currently focused. Does not press Enter.",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "text": { "type": "string" } },
+        "required": ["text"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "press_keys",
+      "tier": "auto_allow",
+      "description": "Press a key or keyboard shortcut, e.g. 'ctrl+c', 'alt+Tab', 'super', 'Return', 'ctrl+shift+t'.",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "combo": { "type": "string" } },
+        "required": ["combo"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "click_element",
+      "tier": "auto_allow",
+      "description": "Click an on-screen button, link, or menu item by its visible label (uses the accessibility tree — semantic, focus-independent).",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "label": { "type": "string" } },
+        "required": ["label"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "mouse_click",
+      "tier": "ask_first",
+      "description": "Click at absolute screen coordinates. Blind (no semantic target) — prefer click_element. Ask-first because a coordinate click can hit anything on screen.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "x": { "type": "integer" },
+          "y": { "type": "integer" },
+          "button": { "type": "string", "enum": ["left", "right", "middle"], "default": "left" }
+        },
+        "required": ["x", "y"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "scroll",
+      "tier": "auto_allow",
+      "description": "Scroll the active window. Negative = down, positive = up.",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "amount": { "type": "integer" } },
+        "required": ["amount"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "read_screen",
+      "tier": "auto_allow",
+      "description": "Read the visible text and labels of the active window via the accessibility tree (no screenshot needed).",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+    },
+    {
+      "name": "list_apps",
+      "tier": "auto_allow",
+      "description": "List the currently open, accessible applications.",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+    },
+    {
+      "name": "screenshot",
+      "tier": "auto_allow",
+      "description": "Capture a screenshot of the whole screen to a PNG file on the local machine. The image never leaves the machine except through the agent's own brain call.",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "path": { "type": "string", "description": "Destination PNG path; backend default if omitted." } },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "run_shell",
+      "tier": "always_confirm",
+      "description": "Run a shell command and return its output. Always-confirm: arbitrary execution replaces the prototype's denylist per the §3 ledger — the tier carries the safety weight now. Prefer dedicated tools when one fits.",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "command": { "type": "string" } },
+        "required": ["command"],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "result_shape": {
+    "$comment": "Every tool returns this shape (as the MCP tool result / HTTP response body, and as voice-session.v1 tool_result fields).",
+    "type": "object",
+    "properties": {
+      "ok": { "type": "boolean" },
+      "result": { "type": "string", "description": "Human/agent-readable outcome; empty on pure side-effect success." },
+      "error": { "type": "string", "description": "Present when ok=false: 'denied' (tier), 'unsupported' (platform), 'timeout', or a failure message." }
+    },
+    "required": ["ok"]
+  }
+}
