@@ -11,20 +11,26 @@ if [ -z "$KEY" ]; then
 fi
 echo "Installing Windy Jarvis → endpoint $ENDPOINT"
 
-# 1) System dependencies (voice + hands + Electron)
+# 1) System dependencies (voice + hands + Electron). Only add node/npm if missing —
+# on boxes that already have node (e.g. nodesource), `apt install npm` conflicts.
+NODE_PKgs=""
+command -v npm >/dev/null 2>&1 || NODE_PKgs="nodejs npm"
 if command -v apt-get >/dev/null; then
   sudo apt-get update -q
-  sudo apt-get install -y ydotool flameshot python3-gi gir1.2-atspi-2.0 \
-    python3-pip portaudio19-dev python3-dev nodejs npm at-spi2-core
+  sudo apt-get install -y ydotool xdotool scrot flameshot python3-gi gir1.2-atspi-2.0 \
+    python3-pip portaudio19-dev python3-dev at-spi2-core $NODE_PKgs
 elif command -v dnf >/dev/null; then
-  sudo dnf install -y ydotool flameshot python3-gobject at-spi2-core \
-    python3-pip portaudio-devel python3-devel nodejs npm
+  sudo dnf install -y ydotool xdotool scrot flameshot python3-gobject at-spi2-core \
+    python3-pip portaudio-devel python3-devel $NODE_PKgs
 else
   echo "Unsupported distro — install manually: ydotool flameshot python3-gi at-spi2 portaudio nodejs"; exit 1
 fi
+command -v npm >/dev/null 2>&1 || { echo "npm still missing — install Node.js manually, then rerun"; exit 1; }
 
-# 2) Python deps
-python3 -m pip install --user --quiet aiohttp numpy pyaudio openwakeword onnxruntime
+# 2) Python deps (--break-system-packages: Ubuntu 24.04+ PEP 668; still user-scoped)
+PIPFLAGS="--user --quiet"
+python3 -m pip install --help 2>/dev/null | grep -q break-system-packages && PIPFLAGS="$PIPFLAGS --break-system-packages"
+python3 -m pip install $PIPFLAGS aiohttp numpy pyaudio openwakeword onnxruntime
 
 # 3) ydotool daemon (Wayland input) + uinput permission
 sudo systemctl enable --now ydotool 2>/dev/null || true

@@ -241,7 +241,12 @@ async def handle(ws):
                 for kind, data in seg.push(bytes(msg)):
                     await utter_q.put(data)
             else:
-                ev = json.loads(msg)
+                try:
+                    ev = json.loads(msg)
+                except Exception:
+                    continue                      # ignore malformed frames, keep the conn
+                if not isinstance(ev, dict):
+                    continue
                 if ev.get("type") == "hello":
                     tools = ev.get("tools", [])
                     prompt = ev.get("prompt") or DEFAULT_PROMPT

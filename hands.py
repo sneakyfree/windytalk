@@ -54,10 +54,42 @@ _KEYCODES = {
 }
 _ALIAS = {"plus": "equal", "esc": "escape", "pgup": "pageup", "pgdn": "pagedown"}
 
+# friendly key names -> xdotool key names (X11 path)
+_XDO = {"return": "Return", "enter": "Return", "tab": "Tab", "escape": "Escape",
+        "esc": "Escape", "space": "space", "backspace": "BackSpace",
+        "delete": "Delete", "del": "Delete", "up": "Up", "down": "Down",
+        "left": "Left", "right": "Right", "home": "Home", "end": "End",
+        "pageup": "Page_Up", "pgup": "Page_Up", "pagedown": "Page_Down",
+        "pgdn": "Page_Down", "super": "super", "meta": "super", "win": "super",
+        "cmd": "super", "control": "ctrl"}
+
+
+def _use_x11() -> bool:
+    """xdotool on X11, ydotool (uinput) on Wayland. WJ_INPUT overrides."""
+    pref = os.environ.get("WJ_INPUT")
+    if pref in ("xdotool", "ydotool"):
+        return pref == "xdotool"
+    on_x11 = (os.environ.get("XDG_SESSION_TYPE") == "x11"
+              or (os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY")))
+    return bool(on_x11 and shutil.which("xdotool"))
+
+
+def _xdotool(*args, timeout: float = 10) -> None:
+    subprocess.run(["xdotool", *args], check=True, capture_output=True, timeout=timeout)
+
+
+def _xdo_name(p: str) -> str:
+    if len(p) >= 2 and p[0] == "f" and p[1:].isdigit():
+        return p.upper()          # f1 -> F1
+    return _XDO.get(p, p)
+
 
 def press_keys(combo: str) -> str:
     """Press a key or chord like 'ctrl+c', 'alt+Tab', 'super', 'Return'."""
     parts = [p.strip().lower() for p in combo.replace(" ", "").split("+") if p.strip()]
+    if _use_x11():
+        _xdotool("key", "+".join(_xdo_name(p) for p in parts))
+        return f"Pressed {combo}"
     parts = [_ALIAS.get(p, p) for p in parts]
     try:
         codes = [_KEYCODES[p] for p in parts]
@@ -69,14 +101,20 @@ def press_keys(combo: str) -> str:
 
 
 def type_text(text: str) -> str:
-    """Type a string into the focused field (via uinput, layout = US ASCII)."""
-    _ydotool("type", "--", text)
+    """Type a string into the focused field."""
+    if _use_x11():
+        _xdotool("type", "--clearmodifiers", "--", text)
+    else:
+        _ydotool("type", "--", text)
     n = len(text)
     return f"Typed {n} character{'s' if n != 1 else ''}"
 
 
 def mouse_move(x: int, y: int) -> str:
-    _ydotool("mousemove", "-a", "-x", str(int(x)), "-y", str(int(y)))
+    if _use_x11():
+        _xdotool("mousemove", str(int(x)), str(int(y)))
+    else:
+        _ydotool("mousemove", "-a", "-x", str(int(x)), "-y", str(int(y)))
     return f"Moved pointer to ({x}, {y})"
 
 
@@ -84,15 +122,23 @@ def mouse_click(x: int | None = None, y: int | None = None, button: str = "left"
     """Click at absolute (x, y); if omitted, click at the current pointer position."""
     if x is not None and y is not None:
         mouse_move(x, y)
-    code = {"left": "0xC0", "right": "0xC1", "middle": "0xC2"}.get(button, "0xC0")
-    _ydotool("click", code)
+    if _use_x11():
+        _xdotool("click", {"left": "1", "middle": "2", "right": "3"}.get(button, "1"))
+    else:
+        code = {"left": "0xC0", "right": "0xC1", "middle": "0xC2"}.get(button, "0xC0")
+        _ydotool("click", code)
     where = f" at ({x}, {y})" if x is not None else ""
     return f"{button.capitalize()}-clicked{where}"
 
 
 def scroll(amount: int = -3) -> str:
     """Scroll the wheel; negative = down, positive = up (in wheel clicks)."""
-    _ydotool("mousemove", "-w", "-x", "0", "-y", str(int(amount)))
+    if _use_x11():
+        btn = "5" if amount < 0 else "4"    # X11: button 5 = down, 4 = up
+        for _ in range(abs(int(amount)) or 1):
+            _xdotool("click", btn)
+    else:
+        _ydotool("mousemove", "-w", "-x", "0", "-y", str(int(amount)))
     return f"Scrolled {'down' if amount < 0 else 'up'} {abs(amount)}"
 
 
@@ -317,7 +363,17 @@ def click_element(label: str) -> str:
 # Screenshots (grim is unsupported on GNOME; use flameshot raw, then portal)
 # ---------------------------------------------------------------------------
 def screenshot(path: str = "/tmp/jarvis_shot.png") -> str:
-    if shutil.which("flameshot"):
+    if _use_x11():  # X11: scrot / imagemagick / gnome-screenshot are most reliable
+        for cmd in (["scrot", "-o", path], ["import", "-window", "root", path],
+                    ["gnome-screenshot", "-f", path]):
+            if shutil.which(cmd[0]):
+                try:
+                    subprocess.run(cmd, check=True, capture_output=True, timeout=15)
+                    if Path(path).exists() and Path(path).stat().st_size > 0:
+                        return f"Saved screenshot to {path}"
+                except Exception:
+                    pass
+    if shutil.which("flameshot"):  # Wayland (grim doesn't work on GNOME) + fallback
         try:
             data = subprocess.run(["flameshot", "full", "--raw"],
                                   capture_output=True, timeout=15).stdout
@@ -326,7 +382,7 @@ def screenshot(path: str = "/tmp/jarvis_shot.png") -> str:
                 return f"Saved screenshot to {path}"
         except Exception:
             pass
-    return "Screenshot failed (no working Wayland capture backend)."
+    return "Screenshot failed (no working capture backend)."
 
 
 # ---------------------------------------------------------------------------
