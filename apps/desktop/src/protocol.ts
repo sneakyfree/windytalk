@@ -42,6 +42,7 @@ export interface Callbacks {
   onLevel?(value: number): void;
   onToolCall?(callId: string, turnId: number, tool: string, args: unknown): void;
   onError?(code: string, message: string, fatal: boolean): void;
+  onBye?(reason: string): void; // engine-initiated close (§5/§9): do NOT reconnect
 }
 
 export class VoiceClient {
@@ -50,6 +51,8 @@ export class VoiceClient {
   private state = "idle";
   private activeSayId = 0;
   private cancelled = new Set<number>();
+  private announced = new Set<number>(); // say_ids that got a say_start (§3 staleness)
+  private maxTurnId = 0; // highest turn seen (§11.5: drop lower-turn stragglers)
   private connectEpochFloor = 0; // say_ids below this are pre-reconnect → stale
   private bargePending = false;
   private clearFence: (() => void) | null = null;
@@ -141,8 +144,10 @@ export class VoiceClient {
     const f = parseFrame(buf);
     if (f === null) return; // §2: drop short frame
     if (f.type !== 0x02) return; // §2: only TTS binary from engine; drop unknown types
-    // §3: discard only cancelled / superseded / pre-reconnect say_ids
+    if (f.payload.length === 0 || f.payload.length % 2 !== 0) return; // §2: drop malformed, don't throw
+    // §3: discard cancelled / superseded / pre-reconnect / never-announced say_ids
     if (this.cancelled.has(f.streamId) || f.streamId < this.connectEpochFloor) return;
+    if (!this.announced.has(f.streamId)) return; // §3: audio with no say_start is stale
     this.cb.onAudio?.(f.streamId, f.payload, (f.flags & FLAG_FINAL) !== 0);
   }
 
@@ -153,18 +158,29 @@ export class VoiceClient {
         // any pre-reconnect say_ids are now stale; current say_ids restart from engine
         this.connectEpochFloor = 0;
         this.cancelled.clear();
+        this.announced.clear();
+        this.maxTurnId = 0;
         this.cb.onReady?.(this.sessionId, Boolean(m.resumed), m.limits);
         break;
       case "state":
         this.state = String(m.value);
-        if (this.state !== "speaking") this.endBarge(); // leaving speaking resolves barge (§7.4)
+        // §7.4: a transition away from `speaking` resolves a pending barge as
+        // cancelled — clear the paused buffers (which also restores playback gain).
+        if (this.state !== "speaking" && this.bargePending) {
+          this.cb.onClearPlayback?.(this.activeSayId);
+          this.cancelled.add(this.activeSayId);
+        }
+        if (this.state !== "speaking") this.endBarge();
         this.cb.onState?.(this.state, m.turn_id as number | undefined);
         break;
       case "heard":
+        if (this.isStaleTurn(m.turn_id)) break; // §11.5: drop lower-turn straggler
         this.cb.onHeard?.(String(m.text), Boolean(m.final), Number(m.turn_id));
         break;
       case "say_start":
+        if (this.isStaleTurn(m.turn_id)) break; // §11.5
         this.activeSayId = Number(m.say_id);
+        this.announced.add(this.activeSayId);
         this.cb.onSayStart?.(this.activeSayId, Number(m.turn_id), String(m.text));
         break;
       case "say_end":
@@ -174,6 +190,9 @@ export class VoiceClient {
         this.cancelled.add(Number(m.say_id));
         this.cb.onClearPlayback?.(Number(m.say_id)); // stop ≤50ms + clear whole turn (§11.5)
         this.endBarge();
+        break;
+      case "bye":
+        this.cb.onBye?.(String(m.reason ?? ""));
         break;
       case "say_resume":
         if (this.bargePending) {
@@ -205,10 +224,20 @@ export class VoiceClient {
     }
   }
 
+  // §11.5: a message whose turn_id is below the highest seen is a stale straggler.
+  private isStaleTurn(turnId: unknown): boolean {
+    const t = Number(turnId);
+    if (!Number.isFinite(t)) return false;
+    if (t < this.maxTurnId) return true;
+    this.maxTurnId = t;
+    return false;
+  }
+
   // Renderer calls this before reconnecting so pre-reconnect audio is discarded.
   markReconnecting(): void {
     this.connectEpochFloor = this.activeSayId + 1;
     this.seqOut = 0;
+    this.announced.clear();
     this.endBarge();
   }
 

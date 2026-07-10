@@ -1,54 +1,161 @@
-// Renderer glue — wires the tested VoiceClient to real audio + face + hands.
-// Runs in the Electron renderer (DOM/WebAudio). No protocol logic lives here;
-// this is transport + I/O + the tool_call → hands-surface dispatch.
+// Renderer glue — wires the tested VoiceClient to real audio + face + control
+// panel + hands. Runs in the Electron renderer (contextIsolation on). No protocol
+// logic lives here; this is transport + I/O + UI wiring. Exposes `window.wt` so the
+// page (control panel + mic button) drives the REAL mic/connection, not a cosmetic flag.
 
 import { Playback } from "./playback.js";
 import { type Callbacks, VoiceClient } from "./protocol.js";
 
-const ENGINE_URL = readEnv("WINDYTALK_ENGINE_URL", "ws://127.0.0.1:8788");
-const HANDS_URL = readEnv("WINDYTALK_HANDS_URL", "http://127.0.0.1:8781");
-
-function readEnv(name: string, fallback: string): string {
-  const w = window as unknown as { WINDYTALK?: Record<string, string> };
-  return w.WINDYTALK?.[name] ?? fallback;
+interface WindytalkBridge {
+  cfg: { engineUrl: string; handsUrl: string; appVersion: string; demo: string; autoMic: boolean };
+  hands: { invoke(tool: string, args: unknown): Promise<{ ok: boolean; result?: string; error?: string }> };
+  quit(): void;
 }
 
-// The face is a plain global (face.js on the page) exposing setState/setLevel/setCaption.
-interface Face {
-  setState(s: string): void;
-  setLevel(v: number): void;
-  setCaption(text: string, kind: "heard" | "say" | "none"): void;
-  setConnected(on: boolean): void;
+export interface Status {
+  connection: "connecting" | "online" | "offline" | "terminal";
+  state: string; // engine state: idle|listening|thinking|speaking|paused
+  micOn: boolean;
+  micError: string | null;
+  sessionId: string | null;
+  lastError: string | null;
+  heard: string;
+  saying: string;
 }
+
+type StatusListener = (s: Status) => void;
+
 declare global {
   interface Window {
-    face: Face;
+    windytalk?: WindytalkBridge;
+    wt?: WindowWT;
+    face?: {
+      setState(s: string): void;
+      setLevel(v: number): void;
+      setCaption(text: string, kind: "heard" | "say" | "none"): void;
+    };
     windyTalkStart?: () => void;
   }
 }
 
+export interface WindowWT {
+  toggleMic(): void;
+  setMic(on: boolean): void;
+  status(): Status;
+  onStatus(cb: StatusListener): void;
+  quit(): void;
+}
+
+const BRIDGE: WindytalkBridge | undefined = (globalThis as unknown as { window: Window }).window?.windytalk;
+const ENGINE_URL = BRIDGE?.cfg.engineUrl ?? "ws://127.0.0.1:8788";
+const RECONNECT_MS = 1500;
+const LIVENESS_MS = 25000; // §9: >25s with no engine frame ⇒ treat as abnormal close
+
 class RendererApp {
   private ws: WebSocket | null = null;
-  private client!: VoiceClient;
+  private client: VoiceClient;
   private playback = new Playback();
+  private audioCtx: AudioContext | null = null;
   private worklet: AudioWorkletNode | null = null;
-  private micOn = false;
+  private micStream: MediaStream | null = null;
+  private micWanted = false; // the user's intent (button)
+  private ready = false; // engine sent `ready` (gate binary until then, §11.1)
+  private terminal = false; // bye/fatal ⇒ never auto-reconnect (§9)
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private livenessTimer: ReturnType<typeof setTimeout> | null = null;
+  private listeners: StatusListener[] = [];
+  private s: Status = {
+    connection: "connecting", state: "idle", micOn: false, micError: null,
+    sessionId: null, lastError: null, heard: "", saying: "",
+  };
+
+  constructor() {
+    this.client = new VoiceClient(this.transport(), this.callbacks());
+  }
 
   async start(): Promise<void> {
-    await this.setupMic();
+    await this.setupMic(); // never throws — surfaces mic errors into status
     this.connect();
-    // drive lip-sync from real output loudness
     setInterval(() => window.face?.setLevel(this.playback.level()), 60);
+    if (BRIDGE?.cfg.autoMic) this.setMic(true);
+  }
+
+  // -- status broadcast ------------------------------------------------------
+
+  onStatus(cb: StatusListener): void {
+    this.listeners.push(cb);
+    cb(this.s);
+  }
+  private emit(patch: Partial<Status>): void {
+    this.s = { ...this.s, ...patch };
+    for (const cb of this.listeners) cb(this.s);
+  }
+
+  // -- transport (rebuilt per socket, client reused) -------------------------
+
+  private transport() {
+    return {
+      send: (d: string | ArrayBuffer) => {
+        // §11.1: no binary before `ready`
+        if (typeof d !== "string" && !this.ready) return;
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.send(d);
+      },
+    };
+  }
+
+  private connect(): void {
+    if (this.terminal) return;
+    this.emit({ connection: "connecting" });
+    this.ready = false;
+    const ws = new WebSocket(ENGINE_URL);
+    ws.binaryType = "arraybuffer";
+    this.ws = ws;
+    ws.onopen = () => {
+      this.client.hello(this.s.sessionId != null); // resume if we have a session (§9)
+      this.armLiveness();
+    };
+    ws.onmessage = (e) => {
+      this.armLiveness();
+      this.client.onWireMessage(e.data);
+    };
+    ws.onclose = () => {
+      this.ready = false;
+      window.face?.setState("offline");
+      this.playback.clearAll(); // §9: drop buffers at reconnect
+      this.client.markReconnecting();
+      if (this.terminal) {
+        this.emit({ connection: "terminal" });
+        return;
+      }
+      this.emit({ connection: "offline" });
+      this.reconnectTimer = setTimeout(() => this.connect(), RECONNECT_MS);
+    };
+    ws.onerror = () => ws.close();
+  }
+
+  private armLiveness(): void {
+    if (this.livenessTimer) clearTimeout(this.livenessTimer);
+    this.livenessTimer = setTimeout(() => {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.close(); // triggers reconnect
+    }, LIVENESS_MS);
   }
 
   private callbacks(): Callbacks {
     const face = () => window.face;
     return {
-      onReady: () => face()?.setConnected(true),
-      onState: (v) => face()?.setState(v),
-      onHeard: (text) => face()?.setCaption(`"${text}"`, "heard"),
-      onSayStart: (_id, _t, text) => face()?.setCaption(text, "say"),
+      onReady: (sid) => {
+        this.ready = true;
+        this.emit({ connection: "online", sessionId: sid, lastError: null });
+        if (this.micWanted) this.client.setMic(true); // re-assert mic on (re)connect
+      },
+      onState: (v) => {
+        face()?.setState(v);
+        // §7.1: tell the capture worklet when the agent is speaking (barge detection)
+        this.worklet?.port.postMessage({ type: "speaking", on: v === "speaking" });
+        this.emit({ state: v });
+      },
+      onHeard: (text) => { face()?.setCaption(`"${text}"`, "heard"); this.emit({ heard: text }); },
+      onSayStart: (_id, _t, text) => { face()?.setCaption(text, "say"); this.emit({ saying: text }); },
       onAudio: (_id, pcm) => this.playback.enqueue(pcm),
       onSayEnd: () => {},
       onPausePlayback: () => this.playback.pause(),
@@ -56,75 +163,87 @@ class RendererApp {
       onClearPlayback: () => this.playback.clearAll(),
       onLevel: (v) => face()?.setLevel(v),
       onToolCall: (callId, _turn, tool, args) => this.dispatchTool(callId, tool, args),
-      onError: (_c, msg, fatal) => {
-        if (fatal) face()?.setConnected(false);
-        console.warn("engine error:", msg);
+      onError: (code, msg, fatal) => {
+        this.emit({ lastError: `${code}: ${msg}` });
+        if (fatal) {
+          this.terminal = true; // §9: fatal ⇒ do not reconnect
+          this.emit({ connection: "terminal" });
+          face()?.setState("offline");
+        }
+      },
+      onBye: () => {
+        this.terminal = true; // §9: bye ⇒ do not reconnect
+        this.emit({ connection: "terminal" });
       },
     };
   }
 
-  private connect(): void {
-    this.ws = new WebSocket(ENGINE_URL);
-    this.ws.binaryType = "arraybuffer";
-    const transport = {
-      send: (d: string | ArrayBuffer) => {
-        if (this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.send(d);
-      },
-    };
-    this.client = new VoiceClient(transport, this.callbacks());
-    this.ws.onopen = () => {
-      this.client.hello();
-      this.client.setMic(this.micOn);
-    };
-    this.ws.onmessage = (e) => this.client.onWireMessage(e.data);
-    this.ws.onclose = () => {
-      window.face?.setConnected(false);
-      this.client.markReconnecting();
-      this.reconnectTimer = setTimeout(() => this.connect(), 1200); // abnormal → resume (§9)
-    };
-    this.ws.onerror = () => this.ws?.close();
-  }
+  // -- mic (the real toggle the UI now drives) -------------------------------
 
   private async setupMic(): Promise<void> {
-    const ctx = new AudioContext();
-    await ctx.audioWorklet.addModule("capture-worklet.js");
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, // §4.1
-    });
-    const src = ctx.createMediaStreamSource(stream);
-    this.worklet = new AudioWorkletNode(ctx, "capture-processor");
-    src.connect(this.worklet);
-    this.worklet.port.onmessage = (e) => {
-      const d = e.data;
-      if (d.type === "frame" && this.micOn) {
-        this.client.pushMicFrame(new Uint8Array(d.pcm));
-      } else if (d.type === "barge") {
-        this.client.localBargeTrigger();
-      }
-    };
+    try {
+      const ctx = new AudioContext();
+      this.audioCtx = ctx;
+      await ctx.audioWorklet.addModule("capture-worklet.js");
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, // §4.1
+      });
+      this.micStream = stream;
+      const src = ctx.createMediaStreamSource(stream);
+      const worklet = new AudioWorkletNode(ctx, "capture-processor");
+      this.worklet = worklet;
+      src.connect(worklet);
+      worklet.connect(ctx.destination); // pull the graph so process() runs (emits silence)
+      worklet.port.onmessage = (e) => {
+        const d = e.data;
+        if (d.type === "frame" && this.micWanted && this.ready) {
+          this.client.pushMicFrame(new Uint8Array(d.pcm));
+        } else if (d.type === "barge") {
+          this.client.localBargeTrigger();
+        }
+      };
+    } catch (err) {
+      // No mic / permission denied: surface it, but still connect so TTS + status work.
+      this.emit({ micError: String((err as Error)?.message || err) });
+    }
   }
 
   setMic(on: boolean): void {
-    this.micOn = on;
-    this.client?.setMic(on);
-    this.worklet?.port.postMessage({ type: "speaking", on: false });
+    if (on && this.s.micError) return; // can't listen without a mic
+    this.micWanted = on;
+    if (this.audioCtx?.state === "suspended") void this.audioCtx.resume();
+    this.client.setMic(on);
+    this.emit({ micOn: on });
+    window.face?.setState(on ? this.s.state : "paused");
+  }
+
+  toggleMic(): void {
+    this.setMic(!this.micWanted);
   }
 
   private async dispatchTool(callId: string, tool: string, args: unknown): Promise<void> {
-    // tool_call → the local hands surface (Task 1.4) → tool_result back to the engine.
+    // Route through the main process (no CORS, token added there).
     try {
-      const resp = await fetch(`${HANDS_URL}/invoke`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tool, args }),
-      });
-      const res = (await resp.json()) as { ok: boolean; result?: string; error?: string };
+      const res = BRIDGE
+        ? await BRIDGE.hands.invoke(tool, args)
+        : { ok: false, error: "hands bridge unavailable" };
       this.client.sendToolResult(callId, res.ok, res.result ?? "", res.error ?? "");
     } catch (e) {
-      this.client.sendToolResult(callId, false, "", `hands unreachable: ${String(e)}`);
+      this.client.sendToolResult(callId, false, "", `hands error: ${String(e)}`);
     }
   }
+
+  status(): Status { return this.s; }
+  quit(): void { BRIDGE?.quit(); }
 }
 
 const app = new RendererApp();
+const wt: WindowWT = {
+  toggleMic: () => app.toggleMic(),
+  setMic: (on) => app.setMic(on),
+  status: () => app.status(),
+  onStatus: (cb) => app.onStatus(cb),
+  quit: () => app.quit(),
+};
+(window as Window).wt = wt;
 window.windyTalkStart = () => void app.start();

@@ -123,6 +123,55 @@ test("cancelled say_id audio is discarded", () => {
   assert.equal(plays, 0);
 });
 
+test("audio with no prior say_start is dropped as stale (§3)", () => {
+  const tx = new FakeTransport();
+  let plays = 0;
+  const c = new VoiceClient(tx, { onAudio: () => plays++ });
+  c.onWireMessage(ttsFrame(9, false)); // never announced → dropped
+  assert.equal(plays, 0);
+});
+
+test("empty/odd TTS payloads are dropped, not thrown (§2)", () => {
+  const tx = new FakeTransport();
+  let plays = 0;
+  const c = new VoiceClient(tx, { onAudio: () => plays++ });
+  c.onWireMessage(JSON.stringify({ type: "say_start", say_id: 1, turn_id: 1, text: "x" }));
+  c.onWireMessage(buildFrame(TTS_TYPE, 0, 0, 0, 1, new Uint8Array([])));    // empty
+  c.onWireMessage(buildFrame(TTS_TYPE, 0, 0, 0, 1, new Uint8Array([1, 2, 3]))); // odd
+  assert.equal(plays, 0);
+});
+
+test("bye routes to onBye (client must not reconnect)", () => {
+  const tx = new FakeTransport();
+  let reason = "";
+  const c = new VoiceClient(tx, { onBye: (r) => (reason = r) });
+  c.onWireMessage(JSON.stringify({ type: "bye", reason: "superseded" }));
+  assert.equal(reason, "superseded");
+});
+
+test("stale lower-turn stragglers are dropped (§11.5)", () => {
+  const tx = new FakeTransport();
+  const heard: number[] = [];
+  const c = new VoiceClient(tx, { onHeard: (_t, _f, turn) => heard.push(turn) });
+  c.onWireMessage(JSON.stringify({ type: "heard", text: "a", final: true, turn_id: 2 }));
+  c.onWireMessage(JSON.stringify({ type: "heard", text: "old", final: true, turn_id: 1 })); // stale
+  c.onWireMessage(JSON.stringify({ type: "heard", text: "b", final: true, turn_id: 3 }));
+  assert.deepEqual(heard, [2, 3]);
+});
+
+test("state leaving speaking during a pending barge clears playback (permanent-mute fix)", () => {
+  const clock = new FakeClock();
+  let cleared = 0;
+  const tx = new FakeTransport();
+  const c = new VoiceClient(tx, { onClearPlayback: () => cleared++ }, clock);
+  c.onWireMessage(JSON.stringify({ type: "say_start", say_id: 5, turn_id: 2, text: "x" }));
+  c.onWireMessage(JSON.stringify({ type: "state", value: "speaking", turn_id: 2 }));
+  c.localBargeTrigger();          // pause pending
+  // the turn ends (say_end lands as user starts talking) → engine sends state listening
+  c.onWireMessage(JSON.stringify({ type: "state", value: "listening", turn_id: 2 }));
+  assert.equal(cleared, 1);       // buffers cleared (restores gain), not stuck at 0
+});
+
 test("tool_call surfaces to the dispatcher", () => {
   const tx = new FakeTransport();
   let seen: unknown = null;
