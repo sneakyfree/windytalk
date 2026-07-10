@@ -1,0 +1,206 @@
+"""Windows desktop-control backend (the Windows peer of linux.py).
+
+Drives the real desktop by shelling out to PowerShell:
+  - UIAutomation (System.Windows.Automation)  → read the screen + click elements
+    semantically (the accessibility tree — no screenshots)
+  - System.Windows.Forms.SendKeys             → type text + key combos
+  - user32 (SetCursorPos / mouse_event)       → mouse move/click/scroll
+  - System.Drawing Graphics.CopyFromScreen    → screenshots
+  - Start-Process                             → launch apps, open URLs, web search
+
+Each PowerShell snippet is passed base64-encoded (-EncodedCommand, UTF-16LE) so
+there is zero shell-escaping ambiguity. Imports cleanly on any OS (it only shells
+out at call time), so the ABC + tests load everywhere; it runs for real on Windows.
+
+Verified primitives present on the GrantW laptop (Windows 11 Pro, PowerShell 5.1):
+UIAutomationClient + System.Windows.Forms both load.
+"""
+from __future__ import annotations
+
+import base64
+import subprocess
+
+from .base import HandsBackend
+
+_APP_ALIASES = {
+    "browser": "msedge", "web browser": "msedge", "chrome": "chrome",
+    "edge": "msedge", "terminal": "wt", "console": "cmd", "files": "explorer",
+    "file manager": "explorer", "explorer": "explorer", "settings": "ms-settings:",
+    "text editor": "notepad", "editor": "notepad", "notepad": "notepad",
+    "calculator": "calc", "calc": "calc", "code": "code", "vscode": "code",
+    "mail": "outlookmail:", "paint": "mspaint",
+}
+
+# friendly key names → SendKeys tokens. Modifiers: ^ ctrl, % alt, + shift.
+_SK_MODS = {"ctrl": "^", "control": "^", "alt": "%", "option": "%",
+            "shift": "+", "cmd": "^", "super": "^", "win": "^", "meta": "^"}
+_SK_KEYS = {
+    "return": "{ENTER}", "enter": "{ENTER}", "tab": "{TAB}", "escape": "{ESC}",
+    "esc": "{ESC}", "space": " ", "delete": "{DEL}", "del": "{DEL}",
+    "backspace": "{BACKSPACE}", "up": "{UP}", "down": "{DOWN}", "left": "{LEFT}",
+    "right": "{RIGHT}", "home": "{HOME}", "end": "{END}", "pageup": "{PGUP}",
+    "pagedown": "{PGDN}", "f1": "{F1}", "f2": "{F2}", "f3": "{F3}", "f4": "{F4}",
+    "f5": "{F5}", "f11": "{F11}", "f12": "{F12}",
+}
+
+
+def _ps(script: str, timeout: float = 20) -> str:
+    """Run a PowerShell snippet via -EncodedCommand; return stdout. Raises on error."""
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    r = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+        capture_output=True, text=True, timeout=timeout)
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr or "powershell failed").strip()[:400])
+    return (r.stdout or "").strip()
+
+
+def _sk_escape(text: str) -> str:
+    # SendKeys treats + ^ % ~ ( ) { } [ ] specially → wrap them in braces.
+    out = []
+    for ch in text:
+        out.append("{" + ch + "}" if ch in "+^%~(){}[]" else ch)
+    return "".join(out)
+
+
+class WindowsBackend(HandsBackend):
+    name = "windows"
+
+    def capabilities(self) -> dict[str, bool]:
+        # All primitives ship with Windows; assume present (probe is cheap at call).
+        from .base import TOOL_NAMES
+        return {t: True for t in TOOL_NAMES}
+
+    # -- apps / web ------------------------------------------------------------
+
+    def open_app(self, name: str) -> str:
+        target = _APP_ALIASES.get(name.strip().lower(), name)
+        try:
+            _ps(f"Start-Process '{target}'")
+            return f"Opening {name}"
+        except Exception:
+            return f"Couldn't find an app called {name!r}."
+
+    def open_url(self, url: str) -> str:
+        if not url.startswith(("http://", "https://")):
+            url = "https://" + url
+        _ps(f"Start-Process '{url}'")
+        return f"Opening {url}"
+
+    def web_search(self, query: str) -> str:
+        from urllib.parse import quote_plus
+        _ps(f"Start-Process 'https://www.google.com/search?q={quote_plus(query)}'")
+        return f"Searching the web for {query!r}"
+
+    # -- keyboard / mouse ------------------------------------------------------
+
+    def type_text(self, text: str) -> str:
+        esc = _sk_escape(text).replace("'", "''")
+        _ps("Add-Type -AssemblyName System.Windows.Forms; "
+            f"[System.Windows.Forms.SendKeys]::SendWait('{esc}')")
+        n = len(text)
+        return f"Typed {n} character{'s' if n != 1 else ''}"
+
+    def press_keys(self, combo: str) -> str:
+        parts = [p.strip().lower() for p in combo.replace(" ", "").split("+") if p.strip()]
+        mods = "".join(_SK_MODS[p] for p in parts if p in _SK_MODS)
+        keys = "".join(_SK_KEYS.get(p, p) for p in parts if p not in _SK_MODS)
+        seq = (mods + "(" + keys + ")") if mods else keys
+        seq = seq.replace("'", "''")
+        _ps("Add-Type -AssemblyName System.Windows.Forms; "
+            f"[System.Windows.Forms.SendKeys]::SendWait('{seq}')")
+        return f"Pressed {combo}"
+
+    def mouse_click(self, x: int, y: int, button: str = "left") -> str:
+        down, up = ("0x0008", "0x0010") if button == "right" else ("0x0002", "0x0004")
+        _ps(
+            "Add-Type @'\nusing System;using System.Runtime.InteropServices;\n"
+            "public class M{[DllImport(\"user32.dll\")]public static extern bool SetCursorPos(int x,int y);"
+            "[DllImport(\"user32.dll\")]public static extern void mouse_event(uint f,uint dx,uint dy,uint d,int e);}\n'@;"
+            f"[M]::SetCursorPos({int(x)},{int(y)});"
+            f"[M]::mouse_event({down},0,0,0,0);[M]::mouse_event({up},0,0,0,0)")
+        return f"{button.capitalize()}-clicked at ({x}, {y})"
+
+    def scroll(self, amount: int) -> str:
+        delta = 120 * int(amount)  # WHEEL_DELTA per notch; +up / -down
+        _ps(
+            "Add-Type @'\nusing System;using System.Runtime.InteropServices;\n"
+            "public class W{[DllImport(\"user32.dll\")]public static extern void mouse_event(uint f,uint dx,uint dy,int d,int e);}\n'@;"
+            f"[W]::mouse_event(0x0800,0,0,{delta},0)")
+        return f"Scrolled {'down' if amount < 0 else 'up'} {abs(amount)}"
+
+    # -- UIAutomation: read + click --------------------------------------------
+
+    def list_apps(self) -> str:
+        out = _ps("Get-Process | Where-Object {$_.MainWindowTitle} | "
+                  "Select-Object -ExpandProperty MainWindowTitle -Unique")
+        names = [n.strip() for n in out.splitlines() if n.strip()][:40]
+        return "Open windows: " + ", ".join(names) if names else "No windows with titles found."
+
+    def read_screen(self) -> str:
+        script = (
+            "Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes;"
+            "$root=[System.Windows.Automation.AutomationElement]::RootElement;"
+            "$foc=[System.Windows.Automation.AutomationElement]::FocusedElement;"
+            "$win=$foc;while($win -ne $null -and $win.Current.ControlType.ProgrammaticName -ne 'ControlType.Window'){$win=[System.Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($win)};"
+            "if($win -eq $null){$win=$foc};"
+            "$cond=[System.Windows.Automation.Condition]::TrueCondition;"
+            "$els=$win.FindAll([System.Windows.Automation.TreeScope]::Descendants,$cond);"
+            "$out=@();foreach($e in $els){$n=$e.Current.Name;$c=$e.Current.ControlType.ProgrammaticName;"
+            "if($n){$out+=('['+$c.Replace('ControlType.','')+'] '+$n)}};"
+            "$out | Select-Object -First 120 | ForEach-Object {$_}")
+        try:
+            out = _ps(script, timeout=18)
+        except Exception:
+            return "Couldn't read the active window's accessibility content."
+        lines = [ln for ln in out.splitlines() if ln.strip()][:120]
+        return "On screen:\n" + "\n".join(lines) if lines else "The active window exposes no accessible text."
+
+    def click_element(self, label: str) -> str:
+        want = label.strip().replace("'", "''")
+        script = (
+            "Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes;"
+            "$foc=[System.Windows.Automation.AutomationElement]::FocusedElement;"
+            "$win=$foc;while($win -ne $null -and $win.Current.ControlType.ProgrammaticName -ne 'ControlType.Window'){$win=[System.Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($win)};"
+            "if($win -eq $null){$win=[System.Windows.Automation.AutomationElement]::RootElement};"
+            f"$cond=New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty,'{want}');"
+            "$el=$win.FindFirst([System.Windows.Automation.TreeScope]::Descendants,$cond);"
+            "if($el -eq $null){'notfound'}else{"
+            "try{$ip=$el.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern);$ip.Invoke();'clicked'}"
+            "catch{try{$sp=$el.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern);$sp.Select();'clicked'}catch{'notfound'}}}")
+        try:
+            r = _ps(script, timeout=15)
+        except Exception:
+            r = "notfound"
+        return f"Clicked {label!r}" if "clicked" in r else f"Couldn't find a clickable element named {label!r}."
+
+    # -- screenshot / shell ----------------------------------------------------
+
+    def screenshot(self, path: str | None = None) -> str:
+        from pathlib import Path
+        shots = Path.home() / ".windytalk" / "screenshots"
+        shots.mkdir(parents=True, exist_ok=True)
+        name = Path(path).name if path else "windytalk_shot.png"
+        if not name.lower().endswith(".png"):
+            name += ".png"
+        dest = str(shots / name).replace("\\", "\\\\").replace("'", "''")
+        _ps(
+            "Add-Type -AssemblyName System.Windows.Forms,System.Drawing;"
+            "$b=[System.Windows.Forms.SystemInformation]::VirtualScreen;"
+            "$bmp=New-Object System.Drawing.Bitmap($b.Width,$b.Height);"
+            "$g=[System.Drawing.Graphics]::FromImage($bmp);"
+            "$g.CopyFromScreen($b.Location,[System.Drawing.Point]::Empty,$b.Size);"
+            f"$bmp.Save('{dest}');$g.Dispose();$bmp.Dispose()", timeout=20)
+        return f"Saved screenshot to {shots / name}"
+
+    def run_shell(self, command: str) -> str:
+        # Safety is the surface's §9 always_confirm gate, not a denylist.
+        try:
+            r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive",
+                                "-Command", command], capture_output=True, text=True, timeout=30)
+            out = (r.stdout or "").strip()
+            err = (r.stderr or "").strip()
+            tail = out[-1500:] if out else (err[-1500:] if err else "(no output)")
+            return f"exit {r.returncode}\n{tail}"
+        except subprocess.TimeoutExpired:
+            return "Command timed out after 30s."
