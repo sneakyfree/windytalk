@@ -21,9 +21,10 @@ jobs:
       - name: Install tooling
         # Engine runtime deps (faster-whisper/kokoro/CUDA) are NOT installed:
         # provider concretes import them lazily, so unit tests run GPU-free.
-        run: pip install ruff pytest jsonschema numpy
-      - name: Lint (ruff)
-        run: ruff check engine telemetry tests
+        # websockets + pytest-asyncio ARE needed (server tests import them).
+        run: pip install ruff pytest pytest-asyncio jsonschema numpy websockets
+      - name: Lint (ruff — all python modules)
+        run: ruff check engine brains agents hands auth telemetry wakeword tests
       - name: Unit tests (pytest)
         run: python -m pytest tests/ -q
 
