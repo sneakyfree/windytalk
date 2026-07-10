@@ -13,6 +13,7 @@ export class Playback {
   private sources = new Set<AudioBufferSourceNode>();
   private gain: GainNode;
   private lastRms = 0;
+  private paused = false;
 
   constructor(ctx?: AudioContext) {
     this.ctx = ctx ?? new AudioContext({ sampleRate: TTS_RATE });
@@ -22,7 +23,8 @@ export class Playback {
 
   /** Enqueue one PCM16 chunk for gapless playback. */
   enqueue(pcm16: Uint8Array): void {
-    const samples = new Int16Array(pcm16.buffer, pcm16.byteOffset, pcm16.byteLength / 2);
+    if (pcm16.byteLength < 2 || pcm16.byteLength % 2 !== 0) return; // guard: empty/odd → skip
+    const samples = new Int16Array(pcm16.buffer, pcm16.byteOffset, pcm16.byteLength >> 1);
     const buf = this.ctx.createBuffer(1, samples.length, TTS_RATE);
     const out = buf.getChannelData(0);
     let sumsq = 0;
@@ -44,10 +46,12 @@ export class Playback {
 
   /** Barge pause — silence quickly but keep the timeline for a possible resume. */
   pause(): void {
+    this.paused = true;
     this.gain.gain.setValueAtTime(0, this.ctx.currentTime);
   }
 
   resume(): void {
+    this.paused = false;
     this.gain.gain.setValueAtTime(1, this.ctx.currentTime);
   }
 
@@ -62,12 +66,14 @@ export class Playback {
     }
     this.sources.clear();
     this.playHead = this.ctx.currentTime;
+    this.paused = false;
     this.gain.gain.setValueAtTime(1, this.ctx.currentTime);
     this.lastRms = 0;
   }
 
   /** Current output loudness 0..1 for lip-sync (approx, from the last chunk). */
   level(): number {
+    if (this.paused) return 0; // §7.4: freeze lip-sync while barge-paused
     return this.sources.size ? Math.min(1, this.lastRms * 3) : 0;
   }
 }

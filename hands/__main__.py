@@ -23,11 +23,12 @@ def _console_confirmer(tool: str, args: dict, tier: str) -> bool:
 
 
 def main() -> None:
-    host = os.environ.get("WINDYTALK_HANDS_HOST", "127.0.0.1")
+    # Always loopback — this port drives the keyboard/mouse/shell; never expose it.
     port = int(os.environ.get("WINDYTALK_HANDS_PORT", "8781"))
     surface = HandsSurface(policy=TierPolicy(confirmer=_console_confirmer))
-    h, p = surface.serve(host, port)
+    h, p = surface.serve("127.0.0.1", port)
     print(f"[hands] control surface on http://{h}:{p}  (backend: {surface.backend.name})")
+    print(f"[hands] token: {surface.token}  (clients must send X-Windytalk-Token)")
     print("[hands] Ctrl-C to stop.")
     try:
         import threading

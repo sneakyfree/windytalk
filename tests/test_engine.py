@@ -78,6 +78,30 @@ def test_vad_ignores_subthreshold_blip():
     assert out == []
 
 
+def test_vad_opens_on_cumulative_not_contiguous_voiced():
+    # §6: voiced frames need not be contiguous. Alternate voiced/unvoiced so no
+    # 8-frame contiguous run ever occurs, but cumulative voiced crosses 150ms.
+    seg = Segmenter(min_speech_ms=150, silence_ms=700, is_speech=_marked_speech(None))
+    for _ in range(16):                    # 8 voiced (160ms cumulative) interleaved
+        seg.push(_frame(True))
+        seg.push(_frame(False))
+    assert seg.in_speech                    # opened despite no contiguous run
+
+
+def test_vad_preroll_keeps_leading_frames():
+    # The utterance should include pre-roll frames captured before it opened, so
+    # the first syllable isn't chopped. Open with 8 voiced frames, then close.
+    seg = Segmenter(min_speech_ms=150, silence_ms=700, is_speech=_marked_speech(None))
+    out = []
+    for _ in range(8):                     # 160ms voiced → opens
+        out += seg.push(_frame(True))
+    for _ in range(36):                    # trailing silence closes
+        out += seg.push(_frame(False))
+    assert len(out) == 1
+    # utterance carries >= the 8 opening frames (pre-roll included, not fewer)
+    assert len(out[0]) >= 8 * FRAME_BYTES
+
+
 # ---------- §10 sentence segmentation ----------
 
 def test_first_segment_is_first_sentence_with_3plus_words():

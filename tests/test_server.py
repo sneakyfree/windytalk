@@ -115,11 +115,16 @@ async def test_version_mismatch_is_fatal(endpoint):
         assert err["type"] == "error" and err["code"] == "version_mismatch" and err["fatal"]
 
 
-async def test_first_message_must_be_hello(endpoint):
+async def test_pre_hello_traffic_is_ignored_then_hello_works(endpoint):
+    # §1: non-hello / binary before hello is silently ignored (not fatal); the
+    # engine keeps waiting and a subsequent hello is honored.
     async with websockets.connect(endpoint) as ws:
-        await ws.send(json.dumps({"type": "mic", "on": True}))
-        err = json.loads(await ws.recv())
-        assert err["type"] == "error" and err["fatal"]
+        await ws.send(json.dumps({"type": "mic", "on": True}))     # ignored
+        await ws.send(build_frame(MIC_TYPE, 0, 0, 0, 0, b"\x00" * 640))  # ignored
+        await ws.send(json.dumps({"type": "hello", "protocol": "voice-session.v1",
+                                  "client": {"app": "t", "version": "1", "platform": "x"}}))
+        ready = json.loads(await ws.recv())
+        assert ready["type"] == "ready"
 
 
 def test_frame_roundtrip():

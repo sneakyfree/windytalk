@@ -56,12 +56,14 @@ class TierPolicy:
             return True
         if tier == ASK_FIRST and tool in self._session_allow:
             return True
-        ok = bool(self.confirmer(tool, args, tier))
-        if ok and tier == ASK_FIRST and _wants_session_allow(args):
+        verdict = self.confirmer(tool, args, tier)
+        # The confirmer OWNS the session-upgrade decision — it may return either
+        # a bool, or (allow, remember). A caller/agent can no longer self-escalate
+        # by injecting an arg; only ask_first tools can be remembered.
+        if isinstance(verdict, tuple):
+            allow, remember = bool(verdict[0]), bool(verdict[1])
+        else:
+            allow, remember = bool(verdict), False
+        if allow and remember and tier == ASK_FIRST:
             self._session_allow.add(tool)
-        return ok
-
-
-def _wants_session_allow(args: dict) -> bool:
-    """The confirmer may signal a session-scoped upgrade via a sentinel arg."""
-    return bool(args.get("_always_allow"))
+        return allow

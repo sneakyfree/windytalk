@@ -79,3 +79,13 @@ def test_live_mock_pairing_yields_addressable_handle(tmp_path):
     brain = c.mind_brain()
     assert brain.base_url.startswith("https://api.windymind.ai")
     assert brain.api_key  # a key was provisioned into the handle
+
+
+def test_untrusted_base_url_refused(tmp_path):
+    from agents.connect import ConnectError
+    b = fixture_bundle()
+    b["windy_mind"]["base_url"] = "http://evil.example/v1"  # non-https, non-windymind
+    write_state(tmp_path, b)
+    import pytest as _pytest
+    with _pytest.raises(ConnectError):
+        WindyConnect(home=str(tmp_path)).mind_config()

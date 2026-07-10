@@ -316,7 +316,15 @@ class LinuxBackend(HandsBackend):
     # -- screenshot / shell ----------------------------------------------------
 
     def screenshot(self, path: str | None = None) -> str:
-        path = path or "/tmp/windytalk_shot.png"
+        # Confine output to a screenshots dir — `path` is a filename only, never an
+        # absolute/traversal path (else `screenshot` becomes an arbitrary-file
+        # overwrite primitive at auto_allow tier).
+        shots_dir = Path.home() / ".windytalk" / "screenshots"
+        shots_dir.mkdir(parents=True, exist_ok=True)
+        name = Path(path).name if path else "windytalk_shot.png"
+        if not name.lower().endswith(".png"):
+            name += ".png"
+        path = str(shots_dir / name)
         if _use_x11():
             for cmd in (["scrot", "-o", path], ["import", "-window", "root", path],
                         ["gnome-screenshot", "-f", path]):

@@ -46,32 +46,48 @@ class Segmenter:
         self.in_speech = False
         self.silence = 0
         self.speech = 0
+        # Pre-roll: the last few frames before the utterance opens, so the leading
+        # phonemes aren't chopped (§6). ~200 ms is enough to catch a word onset.
+        self._preroll_frames = max(1, 200 // FRAME_MS)
+        self._preroll: list[bytes] = []
 
     def push(self, pcm: bytes) -> list[bytes]:
-        """Append audio; return a list of completed utterances (PCM16 bytes)."""
+        """Append audio; return a list of completed utterances (PCM16 bytes).
+
+        §6: the utterance opens on CUMULATIVE voiced time (voiced frames need not
+        be contiguous — VAD flicker on short words must still open a turn), and a
+        pre-roll of recent frames is prepended so the first syllable survives."""
         self.buf.extend(pcm)
         out: list[bytes] = []
         while len(self.buf) >= FRAME_BYTES:
             frame = bytes(self.buf[:FRAME_BYTES])
             del self.buf[:FRAME_BYTES]
             voiced = self._is_speech(frame, MIC_RATE)
-            if voiced:
-                self.speech += FRAME_MS
-                self.silence = 0
-                if not self.in_speech and self.speech >= self.min_speech_ms:
+            if not self.in_speech:
+                # accumulate voiced time cumulatively; keep a rolling pre-roll
+                self._preroll.append(frame)
+                if len(self._preroll) > self._preroll_frames:
+                    self._preroll.pop(0)
+                if voiced:
+                    self.speech += FRAME_MS
+                if self.speech >= self.min_speech_ms:
                     self.in_speech = True
-                if self.in_speech:
-                    self.utter.extend(frame)
+                    self.silence = 0
+                    for f in self._preroll:  # prepend pre-roll so onset isn't clipped
+                        self.utter.extend(f)
+                    self._preroll = []
             else:
-                self.speech = 0
-                if self.in_speech:
-                    self.utter.extend(frame)
+                self.utter.extend(frame)
+                if voiced:
+                    self.silence = 0
+                else:
                     self.silence += FRAME_MS
                     if self.silence >= self.silence_ms:
                         out.append(bytes(self.utter))
                         self.utter = bytearray()
                         self.in_speech = False
                         self.silence = 0
+                        self.speech = 0
         return out
 
     def onset(self, pcm: bytes) -> bool:
