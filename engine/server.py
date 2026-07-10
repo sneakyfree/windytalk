@@ -37,6 +37,14 @@ MIC_TYPE = 0x01
 TTS_TYPE = 0x02
 FLAG_FINAL = 0x01
 SESSION_TTL_S = 60
+_MIC_FRAME_BYTES = 640  # §3: 20 ms @ 16 kHz PCM16 mono
+
+
+def _clamp_int(v, default: int, lo: int, hi: int) -> int:
+    try:
+        return max(lo, min(hi, int(v)))
+    except (TypeError, ValueError):
+        return default
 
 
 def _install_id() -> str:
@@ -121,6 +129,7 @@ class _Conn:
             self._t_eos = time.perf_counter()
             self._first_audio_seen = False
         self._telemetry(e)
+        e.setdefault("ts", now_ms())  # §5: JSON events carry a session-clock ts
         await self.ws.send(json.dumps(e))
 
     def _telemetry(self, e: dict) -> None:
@@ -154,22 +163,25 @@ class VoiceServer:
         self.authorizer = authorizer or get_authorizer()
 
     async def handle(self, ws) -> None:
-        # 1) hello → ready
-        try:
-            raw = await asyncio.wait_for(ws.recv(), timeout=10)
-        except TimeoutError:
-            return
-        try:
-            hello = json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
-            await ws.send(json.dumps({"type": "error", "code": "bad_frame",
-                                      "message": "expected hello", "fatal": True}))
-            return
-        if hello.get("type") != "hello":
-            await ws.send(json.dumps({"type": "error", "code": "bad_frame",
-                                      "message": "first message must be hello",
-                                      "fatal": True}))
-            return
+        # 1) hello → ready. §1: anything before a valid hello is silently ignored
+        # (binary frames, non-hello JSON, unparseable) — keep waiting, don't kill.
+        hello = None
+        deadline = 15.0
+        while hello is None:
+            try:
+                raw = await asyncio.wait_for(ws.recv(), timeout=deadline)
+            except TimeoutError:
+                return
+            except websockets.ConnectionClosed:
+                return
+            if isinstance(raw, (bytes, bytearray)):
+                continue  # binary before hello → ignore (§1)
+            try:
+                m = json.loads(raw)
+            except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+                continue
+            if isinstance(m, dict) and m.get("type") == "hello":
+                hello = m
         proto = hello.get("protocol", "")
         if not _major_ok(proto):
             await ws.send(json.dumps({"type": "error", "code": "version_mismatch",
@@ -189,9 +201,16 @@ class VoiceServer:
         stt, tts, brain = self.make_providers()
         model = getattr(brain, "model", "") or ""
         conn = _Conn(ws, None, session_id=session_id, model=model, actor_id=ent.user_id)
+        # §6: honor + clamp the client's requested endpointing (or defaults)
+        opts = hello.get("options") if isinstance(hello.get("options"), dict) else {}
+        vad = opts.get("vad") if isinstance(opts.get("vad"), dict) else {}
+        min_speech = _clamp_int(vad.get("min_speech_ms"), 150, 50, 1000)
+        silence = _clamp_int(vad.get("silence_ms"), 700, 200, 2000)
+        level_events = opts.get("level_events", True) is not False
         session = VoiceSession(stt, tts, brain, conn.emit, session_id=session_id,
                                system_prompt=self.system_prompt, tools=self.tools,
-                               pace=self.pace, loop=loop)
+                               min_speech_ms=min_speech, silence_ms=silence,
+                               level_events=level_events, pace=self.pace, loop=loop)
         conn.session = session
         t_session_start = time.perf_counter()
         meta = _session_metadata(hello)
@@ -208,7 +227,17 @@ class VoiceServer:
         ping_task = asyncio.ensure_future(self._clock_sync(conn))
         try:
             async for msg in ws:
-                await self._route(conn, msg)
+                try:
+                    await self._route(conn, msg)
+                except websockets.ConnectionClosed:
+                    raise
+                except Exception:
+                    # a malformed message must never kill the session (§5)
+                    try:
+                        await ws.send(json.dumps({"type": "error", "code": "internal",
+                                                  "message": "handler error", "fatal": False}))
+                    except Exception:
+                        pass
         except websockets.ConnectionClosed:
             pass
         finally:
@@ -227,15 +256,19 @@ class VoiceServer:
             parsed = parse_frame(bytes(msg))
             if parsed is None:
                 return
-            ftype, _flags, _seq, ts_ms, _sid, payload = parsed
-            if ftype == MIC_TYPE and payload:
+            ftype, _flags, _seq, ts_ms, sid, payload = parsed
+            # §2: mic frames MUST be 640 bytes with stream_id 0; drop malformed
+            # (an odd-length payload would permanently misalign the VAD buffer).
+            if ftype == MIC_TYPE and len(payload) == _MIC_FRAME_BYTES and sid == 0:
                 self._measure_transport(conn, ts_ms)
                 await session.on_mic_frame(payload)
             return
         try:
             m = json.loads(msg)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             return
+        if not isinstance(m, dict):
+            return  # §5: non-object JSON is ignored, not fatal
         t = m.get("type")
         if t == "mic":
             await session.on_mic(bool(m.get("on")))
@@ -245,7 +278,9 @@ class VoiceServer:
             await session.on_tool_result(m.get("call_id"), bool(m.get("ok")),
                                          m.get("result", ""), m.get("error", ""))
         elif t == "text":
-            await session.on_text(m.get("message", ""))
+            msgtext = m.get("message", "")
+            if isinstance(msgtext, str):
+                await session.on_text(msgtext)
         elif t == "pong":
             self._on_pong(conn, m)
         # unknown types ignored (§1 additive-safety)
@@ -266,14 +301,21 @@ class VoiceServer:
             return
 
     def _on_pong(self, conn: _Conn, m: dict) -> None:
+        t0 = m.get("t0")
+        t_client = m.get("t_client")
+        if not isinstance(t0, (int, float)) or not isinstance(t_client, (int, float)):
+            return  # §5: malformed pong ignored, never crashes
         t_recv = now_ms()
-        rtt = t_recv - m.get("t0", t_recv)
-        if rtt < conn.min_rtt:
+        rtt = t_recv - t0
+        if 0 <= rtt < conn.min_rtt:  # ignore negative RTT (clock step) — §8 min-filter
             conn.min_rtt = rtt
-            conn.offset = m.get("t_client", t_recv) - (m.get("t0", t_recv) + rtt / 2)
+            conn.offset = t_client - (t0 + rtt / 2)
 
     async def serve(self, host: str = "0.0.0.0", port: int = 8788):
-        return await websockets.serve(self.handle, host, port, max_size=None)
+        # §1: deflate off for binary audio (pure latency/CPU tax); cap frame size
+        # so a pre-hello client can't buffer a giant frame (memory DoS).
+        return await websockets.serve(self.handle, host, port,
+                                      compression=None, max_size=4 * 1024 * 1024)
 
 
 def _major_ok(proto: str) -> bool:

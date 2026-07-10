@@ -125,16 +125,39 @@ async def test_brain_error_speaks_fallback():
 
 
 @pytest.mark.asyncio
-async def test_client_barge_in_cancels_and_returns_to_listening():
+async def test_client_barge_in_with_voiced_confirms():
+    # §7.3: client barge_in starts a verdict window; ≥60ms voiced → say_cancel.
     s = make_session(FakeBrain([[BrainEvent(kind="text", text="a long reply here")]]))
     await s.start()
+    s.mic_on = True
     s.state = "speaking"
     s._active_say_id = 3
     s._turn_task = asyncio.ensure_future(asyncio.sleep(5))
     await s.on_barge_in(say_id=3)
+    for _ in range(3):                      # 60ms voiced → confirm
+        await s.on_mic_frame(_voiced())
     assert s.state == "listening"
     cancel = next(e for e in s._events if e["type"] == "say_cancel")
     assert cancel["say_id"] == 3 and cancel["reason"] == "barge_in"
+
+
+@pytest.mark.asyncio
+async def test_client_barge_in_false_positive_resumes():
+    # §7.3: barge_in with no voiced evidence → say_resume at the deadline (no cut).
+    s = make_session(FakeBrain([[BrainEvent(kind="text", text="reply")]]))
+    await s.start()
+    s.mic_on = True
+    s.state = "speaking"
+    s._active_say_id = 4
+    s._turn_task = asyncio.ensure_future(asyncio.sleep(5))
+    await s.on_barge_in(say_id=4)
+    # only silence during the window
+    for _ in range(3):
+        await s.on_mic_frame(_silent())
+    await asyncio.sleep(0.30)               # past the 250ms verdict deadline
+    assert s.state == "speaking"            # not cut
+    assert any(e["type"] == "say_resume" for e in s._events)
+    assert not any(e["type"] == "say_cancel" for e in s._events)
 
 
 @pytest.mark.asyncio
@@ -177,3 +200,53 @@ async def test_tool_round_emits_tool_call_and_continues():
         await s._turn_task
     say = [e for e in s._events if e["type"] == "say_start"]
     assert any("calculator is open" in e["text"].lower() for e in say)
+
+
+@pytest.mark.asyncio
+async def test_conversation_history_records_assistant_replies():
+    # multi-turn: the brain must see its own prior reply (was total amnesia before).
+    s = make_session(FakeBrain([[BrainEvent(kind="text", text="I am Windy.")]]))
+    await s.start()
+    await s.on_text("who are you")
+    if s._turn_task:
+        await s._turn_task
+    roles = [m["role"] for m in s._history]
+    assert "user" in roles and "assistant" in roles
+    assert any(m["role"] == "assistant" and "Windy" in m["content"] for m in s._history)
+
+
+@pytest.mark.asyncio
+async def test_markdown_and_emoji_are_not_spoken():
+    # §10: engine sanitizes before TTS — no asterisks/bullets/emoji reach say_start.
+    s = make_session(FakeBrain([[BrainEvent(kind="text", text="**Sure!** Here it is. 🎉")]]))
+    await s.start()
+    await s.on_text("do it")
+    if s._turn_task:
+        await s._turn_task
+    for e in s._events:
+        if e["type"] == "say_start":
+            assert "*" not in e["text"] and "🎉" not in e["text"]
+
+
+@pytest.mark.asyncio
+async def test_text_mid_turn_does_not_overlap():
+    # §11.4: a second turn cancels the first, never runs two concurrently.
+    s = make_session(FakeBrain([[BrainEvent(kind="text", text="First reply here now.")]]))
+    await s.start()
+    await s.on_text("one")
+    t1 = s._turn_task
+    await s.on_text("two")           # supersedes turn 1
+    assert t1 is not s._turn_task     # a new task
+    assert t1 is None or t1.cancelled() or t1.done()
+    if s._turn_task:
+        await s._turn_task
+
+
+@pytest.mark.asyncio
+async def test_level_events_emitted_while_speaking():
+    s = make_session(FakeBrain([[BrainEvent(kind="text", text="Hello there friend.")]]))
+    await s.start()
+    await s.on_text("hi")
+    if s._turn_task:
+        await s._turn_task
+    assert any(e["type"] == "level" for e in s._events)  # §5 lip-sync path is live
