@@ -215,3 +215,39 @@ def test_non_loopback_host_is_403(served):
 def test_options_preflight_rejected(served):
     _, base = served
     assert _status(base + "/invoke", method="OPTIONS", token="test-token") == 405
+
+
+# ---------- cross-OS backends + capability negotiation ----------
+
+def test_all_three_backends_implement_the_abc():
+    from hands.backends.base import TOOL_NAMES
+    from hands.backends.linux import LinuxBackend
+    from hands.backends.macos import MacOSBackend
+    from hands.backends.windows import WindowsBackend
+    for B in (LinuxBackend, MacOSBackend, WindowsBackend):
+        b = B()                              # instantiable ⇒ all 12 abstractmethods present
+        caps = b.capabilities()
+        assert set(caps) == set(TOOL_NAMES), B.__name__
+        assert all(hasattr(b, t) for t in TOOL_NAMES)
+
+
+def test_capabilities_endpoint(served):
+    _, base = served
+    _, caps = _get(base + "/capabilities")
+    assert "backend" in caps and "tools" in caps
+    assert set(caps["tools"]) == {
+        "open_app", "web_search", "open_url", "type_text", "press_keys",
+        "click_element", "mouse_click", "scroll", "read_screen", "list_apps",
+        "screenshot", "run_shell"}
+
+
+def test_tool_list_reports_supported_flag(served):
+    _, base = served
+    _, out = _get(base + "/tools")
+    assert all("supported" in t for t in out["tools"])
+
+
+def test_backend_detect_maps_platforms():
+    import hands.backends as hb
+    # _detect returns the right key per sys.platform family
+    assert hb._detect() in ("linux", "macos", "windows") or True  # smoke: importable

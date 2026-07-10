@@ -11,7 +11,13 @@ def get_backend(name: str | None = None) -> HandsBackend:
     if name == "linux":
         from .linux import LinuxBackend
         return LinuxBackend()
-    raise UnsupportedTool(f"no hands backend for platform {name!r} yet (Phase 3)")
+    if name == "macos":
+        from .macos import MacOSBackend
+        return MacOSBackend()
+    if name == "windows":
+        from .windows import WindowsBackend
+        return WindowsBackend()
+    raise UnsupportedTool(f"no hands backend for platform {name!r}")
 
 
 def _detect() -> str:

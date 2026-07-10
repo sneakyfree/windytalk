@@ -68,9 +68,19 @@ class HandsSurface:
         return {k: v for k, v in args.items() if k in props}
 
     def tool_list(self) -> list[dict]:
+        caps = self.capabilities()
         return [{"name": t["name"], "description": t["description"],
-                 "tier": t["tier"], "inputSchema": t["inputSchema"]}
+                 "tier": t["tier"], "inputSchema": t["inputSchema"],
+                 "supported": caps.get(t["name"], True)}
                 for t in self.schemas.values()]
+
+    def capabilities(self) -> dict:
+        """Per-OS support map + backend name (the Swiss-army-knife's blade list)."""
+        try:
+            caps = self.backend.capabilities()
+        except Exception:
+            caps = {t: True for t in self.schemas}
+        return {"backend": self.backend.name, "tools": caps}
 
     # -- MCP JSON-RPC ----------------------------------------------------------
 
@@ -138,6 +148,8 @@ class HandsSurface:
                     return
                 if self.path.rstrip("/") == "/tools":
                     self._send(200, {"tools": surface.tool_list()})
+                elif self.path.rstrip("/") == "/capabilities":
+                    self._send(200, surface.capabilities())
                 else:
                     self._send(404, {"error": "not found"})
 

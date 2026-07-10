@@ -52,3 +52,12 @@ class HandsBackend(ABC):
     def screenshot(self, path: str | None = None) -> str: ...
     @abstractmethod
     def run_shell(self, command: str) -> str: ...
+
+    def capabilities(self) -> dict[str, bool]:
+        """Which of the 12 tools this backend can actually do ON THIS MACHINE.
+
+        The Swiss-army-knife knowing which blades it has: a tool whose required
+        primitive is missing (e.g. cliclick absent on a Mac) reports False, so the
+        surface/agent degrade gracefully instead of failing blindly. Default: all
+        supported; OS backends override to reflect what's actually installed."""
+        return {t: True for t in TOOL_NAMES}
