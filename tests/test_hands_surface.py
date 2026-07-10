@@ -1,6 +1,7 @@
 """Task 1.4 tests for the hands surface — tier gating, dispatch, HTTP + MCP —
 against a fake backend (no real desktop)."""
 import json
+import urllib.error
 import urllib.request
 
 import pytest
@@ -72,21 +73,6 @@ def test_always_confirm_runs_when_approved():
     assert seen == [("run_shell", "always_confirm")]
 
 
-def test_ask_first_session_upgrade():
-    calls = []
-
-    def yes(tool, args, tier):
-        calls.append(tool)
-        return True
-    s = surface(confirmer=yes)
-    # mouse_click is ask_first; grant a session upgrade via the sentinel
-    s.invoke("mouse_click", {"x": 1, "y": 2, "_always_allow": True})
-    s.invoke("mouse_click", {"x": 3, "y": 4})   # should NOT re-prompt
-    assert calls == ["mouse_click"]             # confirmer hit once
-    # sentinel was filtered out of the backend call
-    assert all("_always_allow" not in kw for _, kw in s.backend.calls)
-
-
 def test_always_confirm_never_upgrades():
     calls = []
 
@@ -97,6 +83,32 @@ def test_always_confirm_never_upgrades():
     s.invoke("run_shell", {"command": "a", "_always_allow": True})
     s.invoke("run_shell", {"command": "b"})
     assert calls == ["run_shell", "run_shell"]   # confirmed BOTH times
+
+
+def test_agent_cannot_self_escalate_via_args():
+    # The old _always_allow-from-args hole: an agent injecting the sentinel must
+    # NOT get a session upgrade. Only the confirmer's (allow, remember) can.
+    calls = []
+
+    def yes(tool, args, tier):
+        calls.append(tool)
+        return True                        # allow, but do NOT remember
+    s = surface(confirmer=yes)
+    s.invoke("mouse_click", {"x": 1, "y": 2, "_always_allow": True})
+    s.invoke("mouse_click", {"x": 3, "y": 4})
+    assert calls == ["mouse_click", "mouse_click"]  # prompted BOTH times
+
+
+def test_confirmer_tuple_grants_session_upgrade():
+    calls = []
+
+    def yes_remember(tool, args, tier):
+        calls.append(tool)
+        return (True, True)                # allow AND remember (confirmer's choice)
+    s = surface(confirmer=yes_remember)
+    s.invoke("mouse_click", {"x": 1, "y": 2})
+    s.invoke("mouse_click", {"x": 3, "y": 4})   # should NOT re-prompt
+    assert calls == ["mouse_click"]
 
 
 def test_unknown_tool():
@@ -116,38 +128,90 @@ def test_unsupported_maps_cleanly():
 
 @pytest.fixture
 def served():
-    s = surface(confirmer=lambda *a: True)
+    s = HandsSurface(backend=FakeBackend(),
+                     policy=TierPolicy(confirmer=lambda *a: True), token="test-token")
     host, port = s.serve(port=0)  # ephemeral port
     yield s, f"http://{host}:{port}"
     s.stop()
 
 
-def _get(url):
-    with urllib.request.urlopen(url, timeout=3) as r:
-        return json.loads(r.read())
-
-
-def _post(url, payload):
-    req = urllib.request.Request(url, data=json.dumps(payload).encode(),
-                                 headers={"Content-Type": "application/json"})
+def _get(url, token="test-token", extra=None):
+    headers = {"X-Windytalk-Token": token} if token else {}
+    headers.update(extra or {})
+    req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=3) as r:
-        return json.loads(r.read())
+        return r.status, json.loads(r.read())
+
+
+def _post(url, payload, token="test-token", extra=None):
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["X-Windytalk-Token"] = token
+    headers.update(extra or {})
+    req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers=headers)
+    with urllib.request.urlopen(req, timeout=3) as r:
+        return r.status, json.loads(r.read())
+
+
+def _status(url, method="POST", token=None, extra=None):
+    headers = dict(extra or {})
+    if token:
+        headers["X-Windytalk-Token"] = token
+    req = urllib.request.Request(url, data=b"{}" if method == "POST" else None,
+                                 headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=3) as r:
+            return r.status
+    except urllib.error.HTTPError as e:
+        return e.code
 
 
 def test_http_tools_and_invoke(served):
     _, base = served
-    tools = _get(base + "/tools")["tools"]
+    _, tools = _get(base + "/tools")
+    tools = tools["tools"]
     assert len(tools) == 12 and any(t["tier"] == "always_confirm" for t in tools)
-    res = _post(base + "/invoke", {"tool": "open_app", "args": {"name": "calc"}})
+    _, res = _post(base + "/invoke", {"tool": "open_app", "args": {"name": "calc"}})
     assert res["ok"] and "open_app" in res["result"]
 
 
 def test_mcp_list_and_call(served):
     _, base = served
-    lst = _post(base + "/mcp", {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    _, lst = _post(base + "/mcp", {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     names = [t["name"] for t in lst["result"]["tools"]]
     assert "run_shell" in names and "inputSchema" in lst["result"]["tools"][0]
-    call = _post(base + "/mcp", {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
-                                 "params": {"name": "list_apps", "arguments": {}}})
+    _, call = _post(base + "/mcp", {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                                    "params": {"name": "list_apps", "arguments": {}}})
     assert call["result"]["isError"] is False
     assert "list_apps" in call["result"]["content"][0]["text"]
+
+
+# ---------- security: the CSRF/RCE hole is closed ----------
+
+def test_missing_token_is_401(served):
+    _, base = served
+    assert _status(base + "/invoke", token=None) == 401
+
+
+def test_wrong_token_is_401(served):
+    _, base = served
+    assert _status(base + "/invoke", token="nope") == 401
+
+
+def test_browser_origin_is_403(served):
+    # a webpage's fetch always carries an Origin — must be rejected outright (CSRF)
+    _, base = served
+    assert _status(base + "/invoke", token="test-token",
+                   extra={"Origin": "https://evil.example"}) == 403
+
+
+def test_non_loopback_host_is_403(served):
+    # DNS-rebinding attempt: Host header points at a non-loopback name
+    _, base = served
+    assert _status(base + "/invoke", token="test-token",
+                   extra={"Host": "attacker.example"}) == 403
+
+
+def test_options_preflight_rejected(served):
+    _, base = served
+    assert _status(base + "/invoke", method="OPTIONS", token="test-token") == 405

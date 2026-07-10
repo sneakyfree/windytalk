@@ -68,12 +68,18 @@ class WindyConnect:
     # -- the Brain handle (the point of pairing, for Windy Talk) ---------------
 
     def mind_config(self) -> dict:
-        """{base_url, api_key, model} from the paired bundle's windy_mind section."""
+        """{base_url, api_key, model} from the paired bundle's windy_mind section.
+
+        The base_url is pinned to https + an allowlisted host so a poisoned bundle
+        (pairing MITM, or a process that wrote state.json) can't route the user's
+        private transcripts + Mind key to an attacker."""
         mind = self.bundle().get("windy_mind")
         if not mind:
             raise ConnectError("bundle has no windy_mind section")
+        base_url = mind.get("base_url", "https://api.windymind.ai/v1")
+        _require_trusted_url(base_url)
         return {
-            "base_url": mind.get("base_url", "https://api.windymind.ai/v1"),
+            "base_url": base_url,
             "api_key": mind.get("api_key", ""),
             "model": mind.get("default_model") or None,
         }
@@ -110,6 +116,20 @@ class WindyConnect:
         except subprocess.TimeoutExpired as e:
             raise ConnectError("windy connect timed out (browser step?)") from e
         return self.bundle()
+
+
+_TRUSTED_HOST_SUFFIXES = (".windymind.ai", ".windyconnect.com")
+
+
+def _require_trusted_url(url: str) -> None:
+    """Enforce https + an allowlisted host on a bundle-supplied brain URL."""
+    from urllib.parse import urlparse
+    p = urlparse(url or "")
+    host = (p.hostname or "").lower()
+    trusted = host == "api.windymind.ai" or any(host.endswith(s) for s in _TRUSTED_HOST_SUFFIXES)
+    if p.scheme != "https" or not trusted:
+        raise ConnectError(
+            f"refusing untrusted brain URL {url!r} (must be https + a windymind host)")
 
 
 def _parse_iso(s: str) -> datetime:
