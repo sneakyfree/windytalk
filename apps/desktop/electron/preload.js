@@ -27,6 +27,8 @@ contextBridge.exposeInMainWorld("windytalk", {
     pushStatus: (s) => ipcRenderer.send("windytalk:status", s),
     onCommand: (cb) => ipcRenderer.on("windytalk:cmd", (_e, cmd) => cb(cmd)),
     pushProbeResult: (reqId, result) => ipcRenderer.send("windytalk:probe", { reqId, result }),
+    // The physical Reset button (in-process; its confirm IS the always_confirm).
+    reset: () => ipcRenderer.invoke("windytalk:reset"),
   },
   quit: () => ipcRenderer.send("windytalk:quit"),
 });

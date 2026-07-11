@@ -64,6 +64,13 @@ export interface Ticket {
   epoch: number;
   /** True once enter_safe_mode preempted this ticket's lock. */
   readonly abandoned: boolean;
+  /**
+   * Charge the executed debounce/ceiling counters. Called AFTER the tier
+   * confirmer allows and BEFORE the handler runs — a call the user DENIES was
+   * never executed and must not charge (contract: rejected calls do not
+   * increment the executed counter). Layer-1/exempt tickets no-op.
+   */
+  commit(): void;
   /** Release the lock (no-op if not a holder or already preempted). */
   release(): void;
 }
@@ -129,6 +136,7 @@ export class RecoveryCoordinator {
     }
 
     // 2) DEBOUNCE — measured on EXECUTED calls with the same tool+args key.
+    let charge: (() => void) | null = null;
     if (!opts.layer1) {
       const key = this.key(tool, args);
       const last = this.lastByKey.get(key);
@@ -143,16 +151,18 @@ export class RecoveryCoordinator {
         return { proceed: false, error: "rate_limited", reason: "over the 5-per-300s ceiling" };
       }
 
-      // The call WILL execute: charge the executed counters now (rejected calls
-      // above never reached this line, so they never count — as pinned).
-      times.push(nowMs);
-      this.lastByKey.set(key, nowMs);
+      // The counters charge at ticket.commit() — after the tier confirmer —
+      // so a user-DENIED call never counts as executed (as pinned).
+      charge = () => {
+        times.push(this.now());
+        this.lastByKey.set(key, this.now());
+      };
     }
 
-    return this.grant(tool, isHolder ? nowMs : 0);
+    return this.grant(tool, isHolder ? nowMs : 0, charge);
   }
 
-  private grant(tool: string, lockAt: number): GateOutcome {
+  private grant(tool: string, lockAt: number, charge: (() => void) | null = null): GateOutcome {
     let epoch = 0;
     if (lockAt > 0) {
       epoch = ++this.epochCounter;
@@ -164,11 +174,18 @@ export class RecoveryCoordinator {
       };
     }
     const coordinator = this;
+    let charged = false;
     const ticket: Ticket = {
       tool,
       epoch,
       get abandoned(): boolean {
         return epoch !== 0 && coordinator.abandonedEpochs.has(epoch);
+      },
+      commit(): void {
+        if (!charged) {
+          charged = true;
+          charge?.();
+        }
       },
       release(): void {
         if (epoch === 0) return;

@@ -172,6 +172,16 @@ class RendererApp {
   }): void {
     if (cmd.type === "probe" && cmd.reqId != null) {
       void this.answerProbe(cmd.probe ?? "", cmd.reqId);
+    } else if (cmd.type === "deep-reconnect") {
+      // restart_engine (degraded): drop session state so hello() starts a NEW
+      // voice-session instead of resuming, then re-dial.
+      this.emit({ sessionId: null });
+      this.terminal = false;
+      this.reconnectAttempts = 0;
+      this.reconnectNow = true;
+      if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.close();
+      else this.connect();
     } else if (cmd.type === "reconnect") {
       // Explicit re-dial (the reconnect tool / Layer 1): clear terminal — §9's
       // never-AUTO-reconnect rule gates the automatic path, not a commanded one.

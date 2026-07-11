@@ -39,12 +39,35 @@ export class ConfigStore {
   private safeMode: boolean;
   private readonly configPath: string;
   private readonly safeFlagPath: string;
+  /** How the config loaded — drives Layer-1's corrupt-config LKG recovery. */
+  readonly loadedFrom: "config" | "fallback" | "factory";
 
-  constructor(configDir: string) {
+  constructor(configDir: string, opts: { fallback?: () => UserConfig | null } = {}) {
     this.configPath = path.join(configDir, "config.json");
     this.safeFlagPath = path.join(configDir, "safe-mode");
-    this.saved = this.load();
+    const loaded = this.load();
+    if (loaded) {
+      this.saved = loaded;
+      this.loadedFrom = "config";
+    } else {
+      // Corrupt/absent config: Layer-1 recovery — last-known-good first, then
+      // the immutable factory constant (last_known_good.corrupt_fallback).
+      const lkg = opts.fallback?.() ?? null;
+      this.saved = lkg ?? { ...FACTORY_CONFIG };
+      this.loadedFrom = lkg ? "fallback" : "factory";
+      if (lkg) this.persist(); // re-materialize the recovered config
+    }
     this.safeMode = fs.existsSync(this.safeFlagPath);
+  }
+
+  /**
+   * reset_to_defaults: factory (the immutable constant), settings-only, and
+   * CLEARS the persisted safe-mode flag — a reset lands in mode 'normal'.
+   */
+  reset(): void {
+    this.saved = { ...FACTORY_CONFIG };
+    this.persist();
+    this.setSafeMode(false);
   }
 
   /** The persisted (underlying) config — untouched by the safe-mode overlay. */
@@ -86,13 +109,12 @@ export class ConfigStore {
     return { ...this.saved };
   }
 
-  private load(): UserConfig {
+  private load(): UserConfig | null {
     try {
       const parsed = JSON.parse(fs.readFileSync(this.configPath, "utf8"));
       return this.sanitize(parsed);
     } catch {
-      // Absent or corrupt: land on the immutable factory constant.
-      return { ...FACTORY_CONFIG };
+      return null; // absent or corrupt — the constructor picks the fallback
     }
   }
 
