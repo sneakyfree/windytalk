@@ -15,7 +15,8 @@ import type { CrashLoopDetector } from "./layer1.js";
 export type RendererCommand =
   | { type: "reconnect" }
   | { type: "apply-config"; hands_free: boolean }
-  | { type: "notice"; text: string };
+  | { type: "notice"; text: string }
+  | { type: "probe"; probe: "audio-devices" | "selftest"; reqId: number };
 
 export interface SupervisorOpts {
   detector: CrashLoopDetector;
@@ -27,10 +28,38 @@ export interface SupervisorOpts {
 export class Supervisor {
   private status: RendererStatus = OFFLINE_STATUS;
   private listeners: ((s: RendererStatus) => void)[] = [];
+  private pendingProbes = new Map<number, (result: unknown) => void>();
+  private probeSeq = 0;
   private readonly opts: SupervisorOpts;
 
   constructor(opts: SupervisorOpts) {
     this.opts = opts;
+  }
+
+  /**
+   * Ask the RENDERER for something only it can see (audio devices, selftest
+   * stages). Resolves null on timeout / renderer down — callers report honest
+   * failure, never fake data.
+   */
+  probe(kind: "audio-devices" | "selftest", timeoutMs: number): Promise<unknown | null> {
+    const reqId = ++this.probeSeq;
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.pendingProbes.delete(reqId);
+        resolve(null);
+      }, timeoutMs);
+      this.pendingProbes.set(reqId, (result) => {
+        clearTimeout(timer);
+        this.pendingProbes.delete(reqId);
+        resolve(result);
+      });
+      this.opts.sendCommand({ type: "probe", probe: kind, reqId });
+    });
+  }
+
+  /** Wire-in from the renderer's probe replies (IPC). */
+  onProbeResult(reqId: number, result: unknown): void {
+    this.pendingProbes.get(reqId)?.(result);
   }
 
   rendererStatus(): RendererStatus {

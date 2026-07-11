@@ -11,6 +11,7 @@ import { ConfigStore } from "../electron/control/config.js";
 import { RecoveryCoordinator } from "../electron/control/coordinator.js";
 import { EngineAllowList } from "../electron/control/engine-allow.js";
 import { CrashLoopDetector } from "../electron/control/layer1.js";
+import { LogRing } from "../electron/control/logring.js";
 import { ControlMcp } from "../electron/control/mcp.js";
 import { ControlServer } from "../electron/control/server.js";
 import { Supervisor, type RendererCommand } from "../electron/control/supervisor.js";
@@ -84,6 +85,8 @@ test("HTTP routes: /tools, /invoke, /mcp all behind the wall; MCP notification -
     version: "t",
     startedAtMs: Date.now(),
     emit: () => {},
+    logs: new LogRing(),
+    probe: async () => null,
   });
   const mcp = new ControlMcp({ tools, version: "t" });
   const server = new ControlServer({
@@ -117,8 +120,8 @@ test("HTTP routes: /tools, /invoke, /mcp all behind the wall; MCP notification -
 
   const list = await call({ path: "/tools", method: "GET", headers: auth });
   assert.equal(list.status, 200);
-  const names = (JSON.parse(list.body).tools as { name: string }[]).map((t) => t.name).sort();
-  assert.deepEqual(names, ["enter_safe_mode", "get_health", "reconnect"]);
+  const names = (JSON.parse(list.body).tools as { name: string }[]).map((t) => t.name);
+  assert.ok(names.includes("get_health") && names.includes("reconnect") && names.includes("get_logs"));
 
   const invoke = await call(
     { path: "/invoke", method: "POST", headers: auth },

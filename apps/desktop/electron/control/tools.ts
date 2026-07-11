@@ -13,7 +13,8 @@ import type { ConfigStore } from "./config.js";
 import type { CrashLoopDetector } from "./layer1.js";
 import type { EngineAllowList } from "./engine-allow.js";
 import { emitControlAction, type Emitter } from "./emit.js";
-import { scrubShortError } from "./scrub.js";
+import type { LogRing } from "./logring.js";
+import { scrubDeviceName, scrubShortError } from "./scrub.js";
 
 export interface Envelope {
   ok: boolean;
@@ -56,9 +57,16 @@ export interface ToolDeps {
   version: string;
   startedAtMs: number;
   emit: Emitter;
+  logs: LogRing;
+  /** Ask the renderer for audio devices / selftest stages (null on timeout). */
+  probe: (kind: "audio-devices" | "selftest", timeoutMs: number) => Promise<unknown | null>;
+  /** Is the engine a local child on THIS box (drives restart_engine's tri-state)? */
+  engineIsLocal?: () => boolean;
   now?: () => number;
   /** reconnect's pinned block ceiling (10 s prod; injectable for tests). */
   reconnectTimeoutMs?: number;
+  /** run_selftest's per-stage/total ceilings (5 s / 20 s prod; injectable). */
+  selftestStageTimeoutMs?: number;
 }
 
 const MUTATING = new Set(["reconnect", "enter_safe_mode"]);
@@ -74,7 +82,11 @@ export class ControlTools {
 
   /** Built tools only — what /tools and MCP tools/list advertise. */
   builtTools(): string[] {
-    return ["get_health", "reconnect", "enter_safe_mode"];
+    return [
+      "get_health", "get_status", "get_config", "get_logs", "list_audio_devices",
+      "run_selftest", "get_capabilities", "check_for_update",
+      "reconnect", "enter_safe_mode",
+    ];
   }
 
   async dispatch(tool: string, args: Record<string, unknown> = {}, opts: { layer1?: boolean } = {}): Promise<Envelope> {
@@ -88,7 +100,7 @@ export class ControlTools {
     //  Slice-1 tools are auto_allow; slice 4 wires tier_resolution.)
     let res: Envelope;
     try {
-      res = await this.execute(tool);
+      res = await this.execute(tool, args);
     } catch (e) {
       res = { ok: false, error: `${(e as Error)?.name ?? "Error"}: ${scrubShortError(String((e as Error)?.message ?? e))}` };
     } finally {
@@ -108,10 +120,82 @@ export class ControlTools {
     return res;
   }
 
-  private async execute(tool: string): Promise<Envelope> {
+  private async execute(tool: string, args: Record<string, unknown> = {}): Promise<Envelope> {
     switch (tool) {
       case "get_health":
         return { ok: true, result: this.health() };
+      case "get_status": {
+        const s = this.deps.rendererStatus();
+        const state = s.connection === "online" ? s.state : "offline";
+        const known = ["idle", "listening", "thinking", "speaking", "paused", "offline"];
+        return {
+          ok: true,
+          result: {
+            state: known.includes(state) ? state : "idle",
+            mic_on: s.micOn,
+            session_id: s.sessionId,
+          },
+        };
+      }
+      case "get_config": {
+        // Positive allow-list: exactly the $defs/config fields, engine_url
+        // scrubbed, ids passed through (ids are the API surface, not names).
+        const shape = (c: ReturnType<ConfigStore["getActive"]>) => ({
+          engine_url: this.deps.allowList.scrubForDiagnostics(c.engine_url),
+          brain: c.brain,
+          audio_input_id: c.audio_input_id,
+          audio_output_id: c.audio_output_id,
+          volume: c.volume,
+          hands_free: c.hands_free,
+          autonomy: c.autonomy,
+        });
+        return {
+          ok: true,
+          result: {
+            active: shape(this.deps.config.getActive()),
+            saved: shape(this.deps.config.getSaved()),
+          },
+        };
+      }
+      case "get_logs": {
+        const lines = typeof args.lines === "number" ? args.lines : 100;
+        return { ok: true, result: this.deps.logs.tail(lines) };
+      }
+      case "list_audio_devices": {
+        const raw = await this.deps.probe("audio-devices", 5_000);
+        if (raw == null) {
+          return { ok: false, error: "timeout", result: "the app's audio layer did not answer" };
+        }
+        const scrub = (list: unknown, kind: "input" | "output") =>
+          (Array.isArray(list) ? list : [])
+            .filter((d) => d && typeof d.id === "string")
+            .map((d) => ({
+              id: d.id as string,
+              name: scrubDeviceName(String(d.name ?? ""), d.id as string, kind),
+              selected: d.selected === true,
+            }));
+        const devices = raw as { inputs?: unknown; outputs?: unknown };
+        return {
+          ok: true,
+          result: { inputs: scrub(devices.inputs, "input"), outputs: scrub(devices.outputs, "output") },
+        };
+      }
+      case "run_selftest":
+        return { ok: true, result: await this.selftest() };
+      case "get_capabilities":
+        return { ok: true, result: this.capabilities() };
+      case "check_for_update":
+        // INERT until Grant embeds the signing key (self_update.source):
+        // forced-honest, never fake an update state.
+        return {
+          ok: true,
+          result: {
+            update_available: false,
+            current: this.deps.version,
+            latest: null,
+            reason: "no update source configured",
+          },
+        };
       case "reconnect": {
         const ok = await this.deps.reconnectEngine(this.deps.reconnectTimeoutMs ?? 10_000);
         return ok ? { ok: true, result: "reconnected" } : { ok: false, error: "timeout" };
@@ -179,6 +263,73 @@ export class ControlTools {
       summary,
       suggested_fix: suggestedFix,
     };
+  }
+
+  /**
+   * run_selftest (pinned): actively probe the chain. Per-stage timeout 5 s,
+   * whole tool bounded at 20 s; a timed-out stage is pass:false detail:'timeout'.
+   * The mic/speaker stages run IN the renderer (only it owns the audio graph);
+   * engine reachability is judged on live status + frame recency.
+   */
+  private async selftest(): Promise<Record<string, unknown>> {
+    const stageMs = this.deps.selftestStageTimeoutMs ?? 5_000;
+    const s = this.deps.rendererStatus();
+    const enginePass = s.connection === "online";
+    const engine = {
+      pass: enginePass,
+      detail: enginePass ? "session up" : `connection is ${s.connection}`,
+    };
+    // The engine mediates the brain: with a live session the brain answered
+    // hello; without one it is unreachable by construction.
+    const brain = {
+      pass: enginePass,
+      detail: enginePass ? "reachable via engine session" : "unreachable (engine session down)",
+    };
+    // Renderer-owned stages; the probe's own ceiling covers both (2 stages).
+    const probed = (await this.deps.probe("selftest", stageMs * 2)) as {
+      mic?: { pass: boolean; detail: string };
+      speaker?: { pass: boolean; detail: string };
+    } | null;
+    const timeout = { pass: false, detail: "timeout" };
+    return {
+      stages: {
+        engine,
+        brain,
+        mic: probed?.mic ?? timeout,
+        speaker: probed?.speaker ?? timeout,
+      },
+    };
+  }
+
+  /**
+   * get_capabilities (pinned): tri-state per tool for THIS box. An unbuilt
+   * slice reads FALSE (it genuinely cannot run here yet — forced-honest;
+   * slices 3-5 flip these as they land). restart_engine will report
+   * 'degraded' on remote-engine boxes once built.
+   */
+  private capabilities(): Record<string, unknown> {
+    const built = new Set(this.builtTools());
+    const all = [
+      "get_health", "get_status", "get_config", "get_logs", "list_audio_devices",
+      "run_selftest", "get_capabilities", "check_for_update",
+      "reconnect", "enter_safe_mode", "exit_safe_mode", "repair_resurrection",
+      "restart_engine", "restart_app", "clear_cache", "reset_to_defaults", "apply_update",
+      "set_audio_input", "set_audio_output", "set_volume", "set_engine_url",
+      "set_brain", "set_wake_mode", "set_autonomy",
+    ];
+    const tools: Record<string, boolean | string> = {};
+    for (const t of all) {
+      if (!built.has(t)) {
+        tools[t] = false;
+        continue;
+      }
+      if (t === "restart_engine") {
+        tools[t] = this.deps.engineIsLocal?.() ? true : "degraded";
+        continue;
+      }
+      tools[t] = true;
+    }
+    return { os: process.platform, tools };
   }
 
   private summarize(x: {
