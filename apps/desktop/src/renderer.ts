@@ -12,7 +12,10 @@ interface WindytalkBridge {
   hands: { invoke(tool: string, args: unknown): Promise<{ ok: boolean; result?: string; error?: string }> };
   control?: {
     pushStatus(s: Status & { lastFrameAtMs: number | null }): void;
-    onCommand(cb: (cmd: { type: string; hands_free?: boolean; text?: string }) => void): void;
+    onCommand(
+      cb: (cmd: { type: string; hands_free?: boolean; text?: string; probe?: string; reqId?: number }) => void,
+    ): void;
+    pushProbeResult(reqId: number, result: unknown): void;
   };
   quit(): void;
 }
@@ -96,12 +99,80 @@ class RendererApp {
 
   // -- supervisor (control.mcp.v1) bus ---------------------------------------
 
+  // Diagnostics only the renderer can gather (control.mcp.v1 slice 2): the
+  // audio-device list and the mic/speaker selftest stages. Honest results —
+  // a failed stage reports WHY, never fakes a pass.
+  private async answerProbe(kind: string, reqId: number): Promise<void> {
+    let result: unknown = null;
+    try {
+      if (kind === "audio-devices") result = await this.enumerateAudioDevices();
+      else if (kind === "selftest") result = await this.selftestStages();
+    } catch (e) {
+      result = { error: String((e as Error)?.message ?? e) };
+    }
+    BRIDGE?.control?.pushProbeResult(reqId, result);
+  }
+
+  private async enumerateAudioDevices(): Promise<unknown> {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const currentInput = this.micStream?.getAudioTracks()[0]?.getSettings().deviceId ?? null;
+    const shape = (d: MediaDeviceInfo, selected: boolean) => ({
+      id: d.deviceId, name: d.label, selected,
+    });
+    return {
+      inputs: devices
+        .filter((d) => d.kind === "audioinput" && d.deviceId)
+        .map((d) => shape(d, d.deviceId === currentInput || (d.deviceId === "default" && currentInput === null))),
+      outputs: devices
+        .filter((d) => d.kind === "audiooutput" && d.deviceId)
+        .map((d) => shape(d, d.deviceId === "default")),
+    };
+  }
+
+  private async selftestStages(): Promise<unknown> {
+    // Mic: is a live capture track present and active?
+    const track = this.micStream?.getAudioTracks()[0];
+    const mic = track && track.readyState === "live"
+      ? { pass: true, detail: `capturing (${track.label ? "device present" : "unnamed device"})` }
+      : { pass: false, detail: this.s.micError ? `mic error: ${this.s.micError}` : "no live capture track" };
+    // Speaker: play a short quiet test tone through a fresh context.
+    let speaker: { pass: boolean; detail: string };
+    try {
+      const ctx = new AudioContext();
+      if (ctx.state === "suspended") await ctx.resume();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      gain.gain.value = 0.05;
+      osc.frequency.value = 660;
+      osc.connect(gain).connect(ctx.destination);
+      osc.start();
+      await new Promise((r) => setTimeout(r, 180));
+      osc.stop();
+      const ran = ctx.state === "running" && ctx.currentTime > 0;
+      await ctx.close();
+      speaker = ran
+        ? { pass: true, detail: "test tone played" }
+        : { pass: false, detail: `audio context state: ${ctx.state}` };
+    } catch (e) {
+      speaker = { pass: false, detail: String((e as Error)?.message ?? e) };
+    }
+    return { mic, speaker };
+  }
+
   private pushStatus(): void {
     BRIDGE?.control?.pushStatus({ ...this.s, lastFrameAtMs: this.lastFrameAtMs });
   }
 
-  private onSupervisorCommand(cmd: { type: string; hands_free?: boolean; text?: string }): void {
-    if (cmd.type === "reconnect") {
+  private onSupervisorCommand(cmd: {
+    type: string;
+    hands_free?: boolean;
+    text?: string;
+    probe?: string;
+    reqId?: number;
+  }): void {
+    if (cmd.type === "probe" && cmd.reqId != null) {
+      void this.answerProbe(cmd.probe ?? "", cmd.reqId);
+    } else if (cmd.type === "reconnect") {
       // Explicit re-dial (the reconnect tool / Layer 1): clear terminal — §9's
       // never-AUTO-reconnect rule gates the automatic path, not a commanded one.
       this.terminal = false;

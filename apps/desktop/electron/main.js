@@ -27,6 +27,7 @@ import { Supervisor } from "../dist/electron/control/supervisor.js";
 import { ControlTools } from "../dist/electron/control/tools.js";
 import { ControlMcp } from "../dist/electron/control/mcp.js";
 import { makeEmitter } from "../dist/electron/control/emit.js";
+import { LogRing } from "../dist/electron/control/logring.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEMO = process.env.WINDYTALK_DEMO || "";
@@ -130,24 +131,29 @@ async function bootControlPlane() {
   }
 
   // -- supervisor graph (Layer 1 + coordinator + the tool surface) ------------
+  const logs = new LogRing();
+  const slog = (m, level = "info") => {
+    console.log(`[windytalk] ${m}`);
+    logs.append(level, m);
+  };
   configStore = new ConfigStore(paths.configDir);
   const allowList = new EngineAllowList(paths.configDir);
   const coordinator = new RecoveryCoordinator();
   let tools = null; // created below; the detector's trip closes over it
   const detector = new CrashLoopDetector({
     tripSafeMode: (reason) => {
-      console.log(`[windytalk] layer1 safe-mode trip: ${reason}`);
+      slog(`layer1 safe-mode trip: ${reason}`, "warn");
       supervisor.notice("Something kept crashing, so I switched to safe mode to stay stable.");
       if (tools) void tools.layer1TripSafeMode();
     },
-    log: (m) => console.log(`[windytalk] ${m}`),
+    log: (m) => slog(m),
   });
   const supervisor = new Supervisor({
     detector,
     sendCommand: (cmd) => {
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("windytalk:cmd", cmd);
     },
-    log: (m) => console.log(`[windytalk] ${m}`),
+    log: (m) => slog(m, "warn"),
   });
   let resurrectionArmed = false;
   tools = new ControlTools({
@@ -162,10 +168,29 @@ async function bootControlPlane() {
     version: app.getVersion(),
     startedAtMs: Date.now(),
     emit: makeEmitter(),
+    logs,
+    probe: (kind, timeoutMs) => supervisor.probe(kind, timeoutMs),
+    engineIsLocal: () => {
+      try {
+        const host = new URL(configStore.getActive().engine_url).hostname;
+        return ["127.0.0.1", "localhost", "::1"].includes(host);
+      } catch {
+        return false;
+      }
+    },
   });
   const mcp = new ControlMcp({ tools, version: app.getVersion() });
 
-  ipcMain.on("windytalk:status", (_evt, status) => supervisor.onRendererStatus(status));
+  let lastConn = null;
+  ipcMain.on("windytalk:status", (_evt, status) => {
+    if (status && status.connection !== lastConn) {
+      slog(`engine connection: ${lastConn ?? "boot"} -> ${status.connection}`,
+        status.connection === "online" ? "info" : "warn");
+      lastConn = status.connection;
+    }
+    supervisor.onRendererStatus(status);
+  });
+  ipcMain.on("windytalk:probe", (_evt, { reqId, result }) => supervisor.onProbeResult(reqId, result));
   global.__windytalkSupervisor = { supervisor, tools, configStore, detector };
 
   const server = new ControlServer({

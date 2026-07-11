@@ -12,6 +12,7 @@ import { ConfigStore } from "../electron/control/config.js";
 import { RecoveryCoordinator } from "../electron/control/coordinator.js";
 import { EngineAllowList } from "../electron/control/engine-allow.js";
 import { CrashLoopDetector } from "../electron/control/layer1.js";
+import { LogRing } from "../electron/control/logring.js";
 import { ControlMcp, MCP_PROTOCOL, loadContractTools } from "../electron/control/mcp.js";
 import { ControlTools, OFFLINE_STATUS, type RendererStatus } from "../electron/control/tools.js";
 
@@ -66,8 +67,11 @@ function harness(): Harness {
     version: "0.1.0-test",
     startedAtMs: c.now() - 60_000,
     emit: (f) => emitted.push(f),
+    logs: new LogRing({ now: c.now }),
+    probe: async () => null,
     now: c.now,
     reconnectTimeoutMs: 500,
+    selftestStageTimeoutMs: 50,
   });
   return h;
 }
@@ -176,7 +180,7 @@ test("dispatch: unknown tool vs contract-but-unbuilt tool are distinct honest er
   const h = harness();
   const unknown = await h.tools.dispatch("frobnicate");
   assert.equal(unknown.error, "unknown tool: frobnicate");
-  const unbuilt = await h.tools.dispatch("get_status");
+  const unbuilt = await h.tools.dispatch("exit_safe_mode");
   assert.equal(unbuilt.error, "unsupported");
   assert.match(String(unbuilt.result), /not built yet/);
   fs.rmSync(h.dir, { recursive: true, force: true });
@@ -221,7 +225,11 @@ test("MCP: tools/list advertises exactly the built tools, with the contract's de
   const tools = (res?.result as { tools: { name: string; description: string }[] }).tools;
   assert.deepEqual(
     tools.map((t) => t.name).sort(),
-    ["enter_safe_mode", "get_health", "reconnect"],
+    [
+      "check_for_update", "enter_safe_mode", "get_capabilities", "get_config",
+      "get_health", "get_logs", "get_status", "list_audio_devices",
+      "reconnect", "run_selftest",
+    ],
   );
   const contract = loadContractTools();
   if (contract.size > 0) {

@@ -26,6 +26,7 @@ contextBridge.exposeInMainWorld("windytalk", {
   control: {
     pushStatus: (s) => ipcRenderer.send("windytalk:status", s),
     onCommand: (cb) => ipcRenderer.on("windytalk:cmd", (_e, cmd) => cb(cmd)),
+    pushProbeResult: (reqId, result) => ipcRenderer.send("windytalk:probe", { reqId, result }),
   },
   quit: () => ipcRenderer.send("windytalk:quit"),
 });
