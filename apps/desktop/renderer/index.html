@@ -111,10 +111,10 @@
   }
   document.getElementById("close").onclick = () => (window.wt ? window.wt.quit() : window.close && window.close());
   // The physical Reset button: always works, in-process, no agent, no token.
-  // Its confirm dialog IS the always_confirm (control.mcp.v1 the_reset_button).
+  // The confirmation is drawn by the MAIN process (see windytalk:reset) — the
+  // security gate lives there, unspoofable by page JS — so this just asks main
+  // to reset; main shows the native confirm and only proceeds on a human Allow.
   document.getElementById("reset-btn").onclick = async () => {
-    const sure = confirm("Reset ALL settings to factory defaults?\n\nYour conversation history is kept. Windy Talk will restart.");
-    if (!sure) return;
     if (window.windytalk && window.windytalk.control && window.windytalk.control.reset) {
       await window.windytalk.control.reset();
     }

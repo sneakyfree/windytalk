@@ -129,16 +129,51 @@ test("ACCEPTANCE: enter_safe_mode PREEMPTS a held lock — the escape hatch is n
   post.ticket.release();
 });
 
-test("lock ceiling: a stuck holder auto-releases at 30 s — no permanent deadlock", () => {
+test("lock ceiling: a stuck COMMITTED handler auto-releases at 30 s — no permanent deadlock", () => {
   const c = clock();
   const coord = new RecoveryCoordinator({ now: c.now });
   const stuck = coord.gate("restart_engine");
   assert.ok(stuck.proceed);
+  stuck.ticket.commit(); // the handler is executing — the 30 s ceiling now applies
   c.advance(LOCK_CEILING_MS - 1);
   assert.equal(coord.gate("reconnect").proceed, false);
   c.advance(2);
   const freed = coord.gate("reconnect");
-  assert.ok(freed.proceed, "the 30 s ceiling must have released the stuck lock");
+  assert.ok(freed.proceed, "the 30 s ceiling must have released the stuck committed handler");
+  freed.ticket.release();
+});
+
+test("lock ceiling: the 30 s clock starts at COMMIT, not gate — a slow confirm can't drop the lock mid-prompt", () => {
+  const c = clock();
+  const coord = new RecoveryCoordinator({ now: c.now });
+  const held = coord.gate("restart_engine"); // acquired at gate; confirmer pending
+  assert.ok(held.proceed);
+  // 40 s pass while the user stares at the confirm dialog (> the 30 s handler
+  // ceiling). The lock must STILL be held — a concurrent recovery cannot slip in.
+  c.advance(40_000);
+  assert.equal(coord.gate("reconnect").proceed, false, "the lock must survive a long confirm");
+  assert.equal(coord.lockHolderTool, "restart_engine");
+  // The user finally clicks Allow; the handler starts (commit) and gets its
+  // full fresh 30 s window from here.
+  held.ticket.commit();
+  c.advance(LOCK_CEILING_MS - 1);
+  assert.equal(coord.gate("reconnect").proceed, false, "the handler's 30 s starts at commit");
+  c.advance(2);
+  const freed = coord.gate("reconnect");
+  assert.ok(freed.proceed);
+  freed.ticket.release();
+});
+
+test("lock ceiling: a confirmer that NEVER settles still frees the lock at the 75 s confirm-hold bound", () => {
+  const c = clock();
+  const coord = new RecoveryCoordinator({ now: c.now });
+  const hung = coord.gate("restart_engine"); // gate acquired; commit never called
+  assert.ok(hung.proceed);
+  c.advance(74_000);
+  assert.equal(coord.gate("reconnect").proceed, false, "a normal 60 s confirm must not trip it");
+  c.advance(2_000); // past 75 s
+  const freed = coord.gate("reconnect");
+  assert.ok(freed.proceed, "a hung confirmer must eventually free the lock (no deadlock)");
   freed.ticket.release();
 });
 

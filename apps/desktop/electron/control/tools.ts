@@ -339,13 +339,21 @@ export class ControlTools {
         return { ok: false, error: "unsupported", result: status.detail };
       }
       case "restart_engine": {
-        // No local child engine exists in the desktop client (the engine is
-        // Grant's process / the cloud), so the DEGRADED path is the real one:
-        // a deep reconnect — drop session state, new voice-session.
+        // The desktop client never owns the engine as a child process (it's a
+        // separate process — loopback, the LAN 5090, or the cloud), so a deep
+        // reconnect (drop session state, new voice-session) is the real
+        // behavior everywhere; get_capabilities reports 'degraded' accordingly.
         const ok = await this.deps.deepReconnectEngine(this.deps.reconnectTimeoutMs ?? 10_000);
-        return ok
-          ? { ok: true, result: "engine is remote — performed deep reconnect" }
-          : { ok: false, error: "timeout" };
+        if (!ok) return { ok: false, error: "timeout" };
+        // Only claim "remote" when the engine genuinely is off-box — on the
+        // flagship loopback engine "engine is remote" would be factually wrong.
+        const local = this.deps.engineIsLocal?.() ?? false;
+        return {
+          ok: true,
+          result: local
+            ? "restarted the voice session (deep reconnect)"
+            : "engine is remote — performed deep reconnect",
+        };
       }
       case "clear_cache": {
         await this.deps.clearCaches();

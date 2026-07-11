@@ -53,6 +53,16 @@ export const CEILING_WINDOW_MS = 300_000;
 export const LOCK_CEILING_MS = 30_000;
 /** apply_update holds through its staging + verification window (slice 5). */
 export const LOCK_CEILING_UPDATE_MS = 90_000;
+/**
+ * Pre-commit hold ceiling: a lock acquired at gate() but not yet committed is
+ * waiting on the tier confirmer. The confirmer bounds itself (the native dialog
+ * denies after 60 s), so this only backstops a confirmer that never settles —
+ * 75 s comfortably clears a real 60 s confirm while still freeing a truly-hung
+ * one. The HANDLER's own ceiling (30 s / 90 s) starts fresh at commit(), so a
+ * slow confirm can never let the lock self-release mid-prompt and admit a
+ * concurrent recovery (the "one recovery at a time" invariant).
+ */
+export const LOCK_CONFIRM_HOLD_MS = 75_000;
 
 export type GateOutcome =
   | { proceed: true; ticket: Ticket }
@@ -77,9 +87,13 @@ export interface Ticket {
 
 interface LockState {
   tool: string;
+  /** When the CURRENT phase started: gate time until commit, then commit time. */
   since: number;
   epoch: number;
+  /** The handler's ceiling (30 s, or 90 s for apply_update); applies post-commit. */
   ceilingMs: number;
+  /** False while the tier confirmer is pending; true once the handler runs. */
+  committed: boolean;
 }
 
 export class RecoveryCoordinator {
@@ -184,9 +198,10 @@ export class RecoveryCoordinator {
       epoch = ++this.epochCounter;
       this.lock = {
         tool,
-        since: lockAt,
+        since: lockAt, // gate time; the confirm-hold ceiling applies until commit
         epoch,
         ceilingMs: tool === "apply_update" ? LOCK_CEILING_UPDATE_MS : LOCK_CEILING_MS,
+        committed: false,
       };
     }
     const coordinator = this;
@@ -201,6 +216,13 @@ export class RecoveryCoordinator {
         if (!charged) {
           charged = true;
           charge?.();
+          // The handler starts NOW (the confirmer, if any, has resolved): reset
+          // the ceiling clock so a slow confirm never ate into the handler's
+          // window, and switch the lock to its post-commit ceiling.
+          if (epoch !== 0 && coordinator.lock?.epoch === epoch) {
+            coordinator.lock.since = coordinator.now();
+            coordinator.lock.committed = true;
+          }
         }
       },
       release(): void {
@@ -212,10 +234,16 @@ export class RecoveryCoordinator {
     return { proceed: true, ticket };
   }
 
-  /** The lock self-releases at its hard ceiling — no permanent deadlock. */
+  /**
+   * The lock self-releases at its hard ceiling — no permanent deadlock. Before
+   * commit the effective ceiling is the confirm-hold bound (a pending confirmer
+   * must not let the lock lapse and admit a concurrent recovery); after commit
+   * it is the handler's own 30 s / 90 s ceiling, measured from commit time.
+   */
   private liveLock(): LockState | null {
-    if (this.lock && this.now() - this.lock.since >= this.lock.ceilingMs) {
-      this.lock = null;
+    if (this.lock) {
+      const ceiling = this.lock.committed ? this.lock.ceilingMs : LOCK_CONFIRM_HOLD_MS;
+      if (this.now() - this.lock.since >= ceiling) this.lock = null;
     }
     return this.lock;
   }

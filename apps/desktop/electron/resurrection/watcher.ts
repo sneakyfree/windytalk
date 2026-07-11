@@ -265,6 +265,25 @@ export interface RelaunchSpec {
   launch: { cmd: string; args: string[]; cwd?: string; env?: Record<string, string> };
 }
 
+/**
+ * The relaunch binary must be the app's OWN binary — the spec must never be a
+ * "run any command" primitive. In production the watcher runs AS the app's
+ * electron binary (ELECTRON_RUN_AS_NODE), so `cmd` must resolve to the same
+ * path as process.execPath. A same-user process that can only overwrite the
+ * 0600 spec file therefore cannot inject an arbitrary autostart payload. Dev,
+ * the chaos harness, and A/B rollback (a different but app-owned binary) run
+ * the watcher under a different interpreter, so an explicit opt-in escape
+ * (WINDYTALK_ALLOW_FOREIGN_RELAUNCH=1) is honored there.
+ */
+export function relaunchCmdAllowed(cmd: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  if (env.WINDYTALK_ALLOW_FOREIGN_RELAUNCH === "1") return true;
+  try {
+    return fs.realpathSync(cmd) === fs.realpathSync(process.execPath);
+  } catch {
+    return false; // cmd doesn't exist / isn't resolvable -> refuse
+  }
+}
+
 export function relaunchFromSpec(specPath: string, log: (m: string) => void): boolean {
   let spec: RelaunchSpec;
   try {
@@ -277,6 +296,17 @@ export function relaunchFromSpec(specPath: string, log: (m: string) => void): bo
     notifyOs(
       "Windy Talk needs attention",
       "Windy Talk stopped and its restart settings are missing. Open Windy Talk to repair it.",
+    );
+    return false;
+  }
+  if (!relaunchCmdAllowed(spec.launch.cmd)) {
+    // The spec points at something other than the app's own binary — possible
+    // tampering. Refuse rather than execute an arbitrary command as a lingering
+    // autostart. Surface it; do NOT relaunch.
+    log(`REFUSING relaunch: spec cmd is not the app binary (${spec.launch.cmd})`);
+    notifyOs(
+      "Windy Talk needs attention",
+      "Windy Talk's restart settings look wrong and were not trusted. Open Windy Talk to repair it.",
     );
     return false;
   }

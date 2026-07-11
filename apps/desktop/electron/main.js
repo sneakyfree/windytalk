@@ -256,9 +256,23 @@ async function bootControlPlane() {
     supervisor.onRendererStatus(status);
   });
   ipcMain.on("windytalk:probe", (_evt, { reqId, result }) => supervisor.onProbeResult(reqId, result));
-  // The physical Reset button: in-process, no HTTP, no bearer token; its
-  // in-app confirm dialog IS the always_confirm (contract consumers.the_reset_button).
-  ipcMain.handle("windytalk:reset", () => tools.dispatch("reset_to_defaults", {}, { preconfirmed: true }));
+  // The physical Reset button: in-process, no HTTP, no bearer token. The
+  // confirmation is drawn HERE, in the trusted main process — NOT assumed from
+  // the renderer. Any renderer JS could call control.reset(), so trusting a
+  // renderer-supplied preconfirmed flag would make a factory reset reachable by
+  // an XSS sink or a future remote-content load. The button lives in the
+  // renderer, so whenever it is clickable the window is up enough to render
+  // this native dialog; a human clicking Allow IS the proof the button was
+  // legitimately used. Only that main-drawn Allow yields preconfirmed.
+  ipcMain.handle("windytalk:reset", async () => {
+    const outcome = await nativeConfirm({
+      tool: "reset_to_defaults",
+      message: "Reset ALL settings to factory defaults? Your conversation history is kept.",
+      allowSessionGrant: false,
+    });
+    if (outcome !== "allow") return { ok: false, error: "denied" };
+    return tools.dispatch("reset_to_defaults", {}, { preconfirmed: true });
+  });
 
   // The confirmer (security.confirmer_fallback): a native OS dialog drawn by
   // the SUPERVISOR — reachable even when the renderer is down. Fails CLOSED
