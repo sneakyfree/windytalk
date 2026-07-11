@@ -29,6 +29,10 @@ if [ -z "${DISPLAY:-}" ] && [ "$(uname)" != "Darwin" ]; then
 else
   CTL="$(mktemp -d)"
   export WINDYTALK_CONTROL_DIR="$CTL"
+  # This driver runs the watcher under system `node` (not the app's electron
+  # binary), so the production "relaunch cmd must be the app binary" pin would
+  # refuse the electron relaunch. Opt into the dev/test escape explicitly.
+  export WINDYTALK_ALLOW_FOREIGN_RELAUNCH=1
   # Write the relaunch spec the watcher uses (dev launch shape).
   APP_ABS="$(cd "$DESK" && pwd)"
   cat > "$CTL/resurrection.json" <<JSON

@@ -204,12 +204,49 @@ test("repair_resurrection: armed -> ok; privilege-blocked -> unsupported with th
   cleanup(blocked);
 });
 
-test("restart_engine: degraded path returns the pinned string; deep reconnect distinct from reconnect", async () => {
-  const h = harness();
+test("restart_engine: remote engine returns the pinned string; deep reconnect distinct from reconnect", async () => {
+  const h = harness(); // harness leaves engineIsLocal unset -> treated as remote
   const res = await h.tools.dispatch("restart_engine");
   assert.deepEqual(res, { ok: true, result: "engine is remote — performed deep reconnect" });
   assert.equal(h.deepReconnects, 1);
   cleanup(h);
+});
+
+test("restart_engine: on the LOOPBACK engine it does NOT falsely claim 'remote'", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wt-local-eng-"));
+  const c = clock();
+  const config = new ConfigStore(dir);
+  const tools = new ControlTools({
+    coordinator: new RecoveryCoordinator({ now: c.now }),
+    config,
+    allowList: new EngineAllowList(dir),
+    detector: new CrashLoopDetector({ now: c.now, tripSafeMode: () => {} }),
+    rendererStatus: () => ({ ...OFFLINE_STATUS, connection: "online" }),
+    reconnectEngine: async () => true,
+    applyActiveConfig: () => {},
+    resurrectionArmed: () => true,
+    version: "t",
+    startedAtMs: c.now(),
+    emit: () => {},
+    logs: new LogRing({ now: c.now }),
+    probe: async () => null,
+    confirm: async () => "allow",
+    lkg: new LkgStore(dir),
+    deepReconnectEngine: async () => true,
+    clearCaches: async () => {},
+    repairResurrection: async () => ({ armed: true, detail: "" }),
+    restartApp: () => {},
+    resetCrashCounter: () => {},
+    entitledBrains: () => [],
+    engineIsLocal: () => true, // ws://127.0.0.1 — a local engine
+    now: c.now,
+  });
+  config.setSaved({ autonomy: 8 }); // dodge the ask_first prompt
+  const res = await tools.dispatch("restart_engine");
+  assert.equal(res.ok, true);
+  assert.ok(!String(res.result).includes("remote"), "must not claim remote about a loopback engine");
+  assert.match(String(res.result), /deep reconnect/);
+  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 test("clear_cache: clears and reconnects; settings untouched", async () => {
