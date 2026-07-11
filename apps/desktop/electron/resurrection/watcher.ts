@@ -10,6 +10,7 @@
 // and the pid from the heartbeat file ONLY — process-name scanning is FORBIDDEN
 // (heartbeat_content: wrong-kill risk).
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -245,7 +246,10 @@ function relaunchUnderBackoff(
 }
 
 function defaultProbeWritable(dir: string): boolean {
-  const probe = path.join(dir, `.wt-probe-${process.pid}`);
+  // Random, unpredictable name: a same-user process pre-creating a predictable
+  // probe path as a DIRECTORY would force writable=false and trick the watcher
+  // into standing down on a genuinely-wedged app (a self-heal DoS).
+  const probe = path.join(dir, `.wt-probe-${randomBytes(8).toString("hex")}`);
   try {
     fs.writeFileSync(probe, "x");
     fs.unlinkSync(probe);

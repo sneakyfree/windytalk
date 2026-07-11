@@ -84,11 +84,23 @@ export class ControlMcp {
    * body — the HTTP layer answers 204).
    */
   async handle(req: unknown): Promise<Record<string, unknown> | null> {
-    if (typeof req !== "object" || req === null) {
+    // A batch (array) or non-object is Invalid Request. MCP 2025-06-18 removed
+    // batching; answer -32600 rather than silently 204 it (an array would
+    // otherwise destructure to id/method=undefined and look like a notification).
+    if (typeof req !== "object" || req === null || Array.isArray(req)) {
       return { jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request" } };
     }
     const { id, method, params } = req as { id?: unknown; method?: string; params?: Record<string, unknown> };
     const isNotification = id === undefined;
+
+    // A message with no id is a NOTIFICATION: the server must send no response.
+    // Only genuine notification methods are honored; a request method
+    // (initialize/tools/call/…) sent without an id is malformed — do NOT
+    // execute it and reply with a dropped id; ignore it per JSON-RPC.
+    if (isNotification) {
+      if (method === "notifications/initialized") return null;
+      return null; // ignore any other id-less message; never execute+reply
+    }
 
     if (method === "initialize") {
       return {
@@ -101,7 +113,6 @@ export class ControlMcp {
         },
       };
     }
-    if (method === "notifications/initialized") return null;
     if (method === "ping") return { jsonrpc: "2.0", id, result: {} };
     if (method === "tools/list") {
       const tools = this.toolList().map((t) => ({
@@ -128,7 +139,6 @@ export class ControlMcp {
         },
       };
     }
-    if (isNotification) return null; // unknown notifications are ignored per JSON-RPC
     return { jsonrpc: "2.0", id, error: { code: -32601, message: `Method not found: ${method}` } };
   }
 }

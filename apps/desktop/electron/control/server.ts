@@ -13,6 +13,7 @@
 import http from "node:http";
 
 import { CONTROL_PORT, MAX_BODY_BYTES, TOKEN_HEADER } from "./constants.js";
+import { scrubShortError } from "./scrub.js";
 import { tokenEquals } from "./token.js";
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
@@ -147,7 +148,9 @@ export class ControlServer {
             this.served();
             this.send(res, 200, out);
           })
-          .catch((e) => this.send(res, 200, { ok: false, error: `dispatch failed: ${String(e)}` }));
+          .catch((e) =>
+            this.send(res, 200, { ok: false, error: "internal error", result: scrubShortError(String(e)) }),
+          );
       });
       return;
     }
@@ -169,7 +172,7 @@ export class ControlServer {
             this.send(res, 200, {
               jsonrpc: "2.0",
               id: null,
-              error: { code: -32603, message: `internal: ${String(e)}` },
+              error: { code: -32603, message: `internal: ${scrubShortError(String(e))}` },
             }),
           );
       });
@@ -216,6 +219,10 @@ export class ControlServer {
     req.on("end", () => {
       if (size <= MAX_BODY_BYTES) done(Buffer.concat(chunks).toString("utf8"));
     });
+    // A client abort mid-body emits 'error' on the request stream; without a
+    // listener Node would throw. The supervisor must never crash on a peer's
+    // dropped connection (the doctor is not in the patient).
+    req.on("error", () => {});
   }
 }
 
