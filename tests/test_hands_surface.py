@@ -247,6 +247,57 @@ def test_tool_list_reports_supported_flag(served):
     assert all("supported" in t for t in out["tools"])
 
 
+def test_tool_list_supported_reflects_backend_capabilities():
+    # Regression: the supported flag was read from the outer {"backend","tools"}
+    # dict instead of caps["tools"], so it was ALWAYS True and capability
+    # negotiation was silently dead. A backend that reports a tool unsupported
+    # must surface supported=False for exactly that tool.
+    class PartialBackend(FakeBackend):
+        def capabilities(self):
+            return {
+                "open_app": True, "web_search": True, "open_url": True, "type_text": True,
+                "press_keys": True, "click_element": True, "mouse_click": True, "scroll": True,
+                "read_screen": True, "list_apps": True, "screenshot": False, "run_shell": True,
+            }
+
+    s = HandsSurface(backend=PartialBackend(), policy=TierPolicy(confirmer=deny_all))
+    flags = {t["name"]: t["supported"] for t in s.tool_list()}
+    assert flags["screenshot"] is False, "an unsupported tool must advertise supported=False"
+    assert flags["open_app"] is True
+    assert False in set(flags.values()), "capability negotiation must be alive (not all-True)"
+
+
+def test_invoke_rejects_non_dict_args_instead_of_crashing():
+    # Regression: dict("foo") / dict([1,2]) raised before the try/except and
+    # dropped the connection; now it returns the result shape honestly.
+    s = surface(confirmer=lambda *a: True)
+    assert s.invoke("open_app", "not-a-dict") == {"ok": False, "error": "bad args: expected an object"}
+    assert s.invoke("open_app", [1, 2]) == {"ok": False, "error": "bad args: expected an object"}
+
+
+def test_bad_content_length_returns_400_not_a_dropped_socket(served):
+    _, base = served
+    # Non-integer and negative Content-Length must both 400 (the negative one
+    # previously made rfile.read(-1) block to EOF and wedge the handler thread).
+    for bad in ("abc", "-1"):
+        req = urllib.request.Request(
+            base + "/invoke", data=b'{"tool":"open_app","args":{"name":"x"}}',
+            headers={"Content-Type": "application/json", "X-Windytalk-Token": "test-token",
+                     "Content-Length": bad}, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=3) as r:
+                code = r.status
+        except urllib.error.HTTPError as e:
+            code = e.code
+        assert code == 400, f"Content-Length {bad!r} should 400, got {code}"
+
+
+def test_non_ascii_token_fails_closed_401_not_500(served):
+    _, base = served
+    code = _status(base + "/invoke", token="café")  # non-ASCII token header
+    assert code == 401, "a non-ASCII token must fail closed with 401, never crash the handler"
+
+
 def test_backend_detect_maps_platforms():
     import hands.backends as hb
     # _detect returns the right key per sys.platform family

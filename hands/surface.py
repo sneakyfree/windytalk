@@ -47,6 +47,12 @@ class HandsSurface:
     # -- the shared dispatch (both tenants) ------------------------------------
 
     def invoke(self, tool: str, args: dict | None = None) -> dict:
+        # A hostile/buggy client can send `arguments` as a string or array;
+        # dict("foo") / dict([1,2]) would raise BEFORE the try/except below and
+        # drop the connection instead of returning the result shape. Reject
+        # non-dict args honestly.
+        if args is not None and not isinstance(args, dict):
+            return {"ok": False, "error": "bad args: expected an object"}
         args = dict(args or {})
         if tool not in TOOL_NAMES:
             return {"ok": False, "error": f"unknown tool: {tool}"}
@@ -68,7 +74,11 @@ class HandsSurface:
         return {k: v for k, v in args.items() if k in props}
 
     def tool_list(self) -> list[dict]:
-        caps = self.capabilities()
+        # capabilities() returns {"backend": ..., "tools": {name: bool}} — the
+        # per-tool map lives under "tools", NOT at the top level. Reading the
+        # top level always missed and defaulted to True, so every tool was
+        # advertised as supported on every box (capability negotiation was dead).
+        caps = self.capabilities().get("tools", {})
         return [{"name": t["name"], "description": t["description"],
                  "tier": t["tier"], "inputSchema": t["inputSchema"],
                  "supported": caps.get(t["name"], True)}
@@ -138,7 +148,10 @@ class HandsSurface:
                 #    is their only barrier; don't leak length/prefix via timing).
                 import secrets
                 presented = self.headers.get("X-Windytalk-Token") or ""
-                if not secrets.compare_digest(presented, surface.token):
+                # compare_digest raises TypeError on non-ASCII str operands;
+                # compare on bytes so a `café` token header fails closed with a
+                # clean 401 instead of an uncaught 500 / dropped socket.
+                if not secrets.compare_digest(presented.encode(), surface.token.encode()):
                     self._send(401, {"ok": False, "error": "unauthorized"})
                     return False
                 return True
@@ -160,10 +173,24 @@ class HandsSurface:
             def do_POST(self):
                 if not self._guard():
                     return
-                length = int(self.headers.get("Content-Length", 0) or 0)
+                # A non-integer Content-Length would raise; a NEGATIVE one would
+                # pass the size cap and make rfile.read(-1) block reading to EOF,
+                # wedging this thread forever (a ThreadingHTTPServer DoS). Parse
+                # defensively and reject anything not in [0, max_body].
+                try:
+                    length = int(self.headers.get("Content-Length", 0) or 0)
+                except (TypeError, ValueError):
+                    self._send(400, {"ok": False, "error": "bad content-length"})
+                    return
+                if length < 0:
+                    self._send(400, {"ok": False, "error": "bad content-length"})
+                    return
                 if length > max_body:
                     self._send(413, {"ok": False, "error": "too large"})
                     return
+                # No single un-guarded input should ever drop the connection —
+                # the contract's "never silence" guarantee. Any unexpected error
+                # becomes a 500 with a result shape, not a socket reset.
                 try:
                     body = json.loads(self.rfile.read(length) or b"{}")
                 except json.JSONDecodeError:
@@ -172,12 +199,15 @@ class HandsSurface:
                 if not isinstance(body, dict):
                     self._send(400, {"error": "bad body"})
                     return
-                if self.path.rstrip("/") == "/invoke":
-                    self._send(200, surface.invoke(body.get("tool"), body.get("args")))
-                elif self.path.rstrip("/") == "/mcp":
-                    self._send(200, surface.handle_mcp(body))
-                else:
-                    self._send(404, {"error": "not found"})
+                try:
+                    if self.path.rstrip("/") == "/invoke":
+                        self._send(200, surface.invoke(body.get("tool"), body.get("args")))
+                    elif self.path.rstrip("/") == "/mcp":
+                        self._send(200, surface.handle_mcp(body))
+                    else:
+                        self._send(404, {"error": "not found"})
+                except Exception as e:  # noqa: BLE001 — never leak a raw traceback / drop the socket
+                    self._send(500, {"ok": False, "error": f"internal: {type(e).__name__}"})
 
         # Bind loopback only — never expose the desktop-control port off-box.
         bind_host = host if host in _loopback else "127.0.0.1"
