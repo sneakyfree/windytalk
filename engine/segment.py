@@ -49,7 +49,11 @@ def _cut_point(buf: str) -> int | None:
     for m in _BOUNDARY.finditer(buf):
         end = m.end()
         after = buf[end:end + 1]
-        if (after == "" or after.isspace()) and _word_count(buf[:end]) >= MIN_WORDS:
+        # A boundary must be FOLLOWED by whitespace — end-of-buffer ("") does NOT
+        # qualify during streaming: "It costs 3." mid-stream is not a sentence end
+        # (the next token may be "50"). The genuine end-of-text is handled by the
+        # tail path in segment_stream()/the session loop, so nothing is lost.
+        if after.isspace() and _word_count(buf[:end]) >= MIN_WORDS:
             boundary = end
             break
     runon = _runon_pos(buf)

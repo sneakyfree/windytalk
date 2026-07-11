@@ -21,6 +21,7 @@ FRAME_BYTES = MIC_RATE * FRAME_MS // 1000 * 2   # 640
 
 DEFAULT_MIN_SPEECH_MS = 150    # voice-session.v1 §6
 DEFAULT_SILENCE_MS = 700       # voice-session.v1 §6
+DEFAULT_MAX_UTTER_MS = 30000   # hard cap: force EOS even if silence never arrives
 
 IsSpeech = Callable[[bytes, int], bool]
 
@@ -37,9 +38,12 @@ class Segmenter:
 
     def __init__(self, min_speech_ms: int = DEFAULT_MIN_SPEECH_MS,
                  silence_ms: int = DEFAULT_SILENCE_MS,
-                 is_speech: IsSpeech | None = None) -> None:
+                 is_speech: IsSpeech | None = None,
+                 max_utter_ms: int = DEFAULT_MAX_UTTER_MS) -> None:
         self.min_speech_ms = min_speech_ms
         self.silence_ms = silence_ms
+        self.max_utter_ms = max_utter_ms
+        self._max_utter_bytes = max_utter_ms * MIC_RATE // 1000 * 2
         self._is_speech = is_speech or _default_is_speech()
         self.buf = bytearray()
         self.utter = bytearray()
@@ -82,12 +86,17 @@ class Segmenter:
                     self.silence = 0
                 else:
                     self.silence += FRAME_MS
-                    if self.silence >= self.silence_ms:
-                        out.append(bytes(self.utter))
-                        self.utter = bytearray()
-                        self.in_speech = False
-                        self.silence = 0
-                        self.speech = 0
+                # Close on a silence gap (normal EOS) OR on the hard length cap — a
+                # noisy room / fan / music can keep VAD hot so silence never arrives;
+                # without the cap the utterance grows unbounded and the engine never
+                # responds for the rest of the session.
+                if (self.silence >= self.silence_ms
+                        or len(self.utter) >= self._max_utter_bytes):
+                    out.append(bytes(self.utter))
+                    self.utter = bytearray()
+                    self.in_speech = False
+                    self.silence = 0
+                    self.speech = 0
         return out
 
     def onset(self, pcm: bytes) -> bool:

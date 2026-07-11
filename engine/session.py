@@ -36,8 +36,9 @@ Emit = Callable[[dict], Awaitable[None]]
 TTS_RATE = 24000
 _AUDIO_FRAME_MS = 20
 _AUDIO_FRAME_BYTES = TTS_RATE * _AUDIO_FRAME_MS // 1000 * 2  # 960
-_BARGE_CONFIRM_MS = 60           # §7.3 cumulative voiced to confirm a barge
+_BARGE_CONFIRM_MS = 60           # §7.3 voiced to confirm a barge (within the window)
 _BARGE_VERDICT_MS = 250          # §7.3 engine must reply within 250 ms
+_BARGE_DECAY_MS = 100            # a silence gap this long resets the voiced tally
 _MIC_FRAME_BYTES = 16000 * FRAME_MS // 1000 * 2  # 640
 _LEVEL_EVERY = 2                 # emit `level` every N audio chunks (~25 Hz)
 _FALLBACK_LINE = "Sorry, I'm having trouble reaching my brain right now."
@@ -67,6 +68,7 @@ class VoiceSession:
         self._turn_task: asyncio.Task | None = None
         self._active_say_id = 0
         self._barge_voiced_ms = 0
+        self._barge_unvoiced_run = 0            # consecutive unvoiced frames (decay window)
         self._barge_frames: list[bytes] = []   # frames captured during a barge (carried to new turn)
         self._barge_verdict: asyncio.Task | None = None
         self._history: list[dict] = []
@@ -117,9 +119,12 @@ class VoiceSession:
 
     async def on_barge_in(self, say_id: int | None = None) -> None:
         # §7.3: client-signaled barge → start a ≤250 ms verdict window. Confirm if
-        # ≥60 ms cumulative voiced arrives; otherwise reply say_resume at the
-        # deadline. (The engine's own detector in on_mic_frame can confirm sooner.)
-        if self.state != "speaking" or self._barge_verdict is not None:
+        # ≥60 ms voiced arrives; otherwise reply say_resume at the deadline. (The
+        # engine's own detector in on_mic_frame can confirm sooner.)
+        # §6: a barge adjacent to mic-off gets NO verdict — if the mic is off there
+        # is no voiced audio to confirm it, so don't open a window that can only
+        # resolve as a false-positive say_resume.
+        if self.state != "speaking" or self._barge_verdict is not None or not self.mic_on:
             return
         loop = self.loop or asyncio.get_running_loop()
         self._barge_verdict = loop.create_task(self._barge_verdict_window())
@@ -160,9 +165,17 @@ class VoiceSession:
                 self._barge_frames.pop(0)
             if voiced:
                 self._barge_voiced_ms += FRAME_MS
+                self._barge_unvoiced_run = 0
                 if self._barge_voiced_ms >= _BARGE_CONFIRM_MS:
                     await self._confirm_barge()
-            # cumulative within the window; no reset on a single unvoiced frame (§7.3)
+            else:
+                # Decay: a silence gap resets the tally so sparse false-voiced frames
+                # (imperfect AEC, background noise) spread across a long reply can't
+                # accumulate to a spurious barge. §7.3 wants ≥60 ms voiced *within*
+                # the decision window, not cumulative over the whole speaking phase.
+                self._barge_unvoiced_run += 1
+                if self._barge_unvoiced_run * FRAME_MS >= _BARGE_DECAY_MS:
+                    self._barge_voiced_ms = 0
         # thinking/idle/paused: frames feed VAD only (dropped, §6/§11.4)
 
     # -- turn orchestration ----------------------------------------------------
@@ -175,8 +188,13 @@ class VoiceSession:
         self.turn_id += 1
         self._active_say_id = 0
         self._barge_voiced_ms = 0
+        self._barge_unvoiced_run = 0
         self._barge_frames = []
-        await self._set_state("thinking")
+        # Enter "thinking" internally (so no second utterance races in) but DON'T
+        # emit it yet — §6 requires heard{final} to precede state{thinking} on the
+        # wire, and on the mic path the transcript isn't known until STT runs inside
+        # _run_turn. _run_turn emits `heard` then announces `thinking`.
+        self.state = "thinking"
         loop = self.loop or asyncio.get_running_loop()
         self._turn_task = loop.create_task(self._run_turn(user_text, utter_pcm))
 
@@ -191,6 +209,7 @@ class VoiceSession:
                     return  # nothing intelligible; `finally` returns to listening
             await self.emit({"type": "heard", "text": user_text, "final": True,
                              "turn_id": self.turn_id})
+            await self._set_state("thinking")  # §6: announced AFTER heard{final}
             self._history.append({"role": "user", "content": user_text})
             reply = await self._stream_and_speak()
             if reply:
@@ -306,6 +325,7 @@ class VoiceSession:
         if self.state == "thinking":
             await self._set_state("speaking")
             self._barge_voiced_ms = 0
+            self._barge_unvoiced_run = 0
         n = 0
         for i in range(0, len(pcm), _AUDIO_FRAME_BYTES):
             chunk = pcm[i:i + _AUDIO_FRAME_BYTES]
@@ -364,6 +384,7 @@ class VoiceSession:
                              "reason": reason})
         self._active_say_id = 0
         self._barge_voiced_ms = 0
+        self._barge_unvoiced_run = 0
         self._barge_frames = []
 
     # -- helpers ---------------------------------------------------------------

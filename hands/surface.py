@@ -133,8 +133,12 @@ class HandsSurface:
                 if host_hdr and host_hdr not in _loopback:
                     self._send(403, {"ok": False, "error": "forbidden host"})
                     return False
-                # 3) bearer token must match.
-                if self.headers.get("X-Windytalk-Token") != surface.token:
+                # 3) bearer token must match (constant-time — on a shared host the
+                #    loopback port is reachable by other local users, and the token
+                #    is their only barrier; don't leak length/prefix via timing).
+                import secrets
+                presented = self.headers.get("X-Windytalk-Token") or ""
+                if not secrets.compare_digest(presented, surface.token):
                     self._send(401, {"ok": False, "error": "unauthorized"})
                     return False
                 return True

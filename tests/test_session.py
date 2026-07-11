@@ -250,3 +250,42 @@ async def test_level_events_emitted_while_speaking():
     if s._turn_task:
         await s._turn_task
     assert any(e["type"] == "level" for e in s._events)  # §5 lip-sync path is live
+
+
+@pytest.mark.asyncio
+async def test_heard_precedes_thinking_on_wire():
+    # §6: heard{final} MUST be emitted before state{thinking} (fresh-audit H2).
+    s = make_session(FakeBrain([[BrainEvent(kind="text", text="Opening it now for you.")]]))
+    await s.start()
+    await _drive_utterance(s)
+    seq = [(e["type"], e.get("value")) for e in s._events
+           if e["type"] == "heard" or (e["type"] == "state" and e.get("value") == "thinking")]
+    assert ("heard", None) in seq and ("state", "thinking") in seq
+    assert seq.index(("heard", None)) < seq.index(("state", "thinking"))
+
+
+@pytest.mark.asyncio
+async def test_unintelligible_utterance_emits_no_thinking():
+    # <2 chars STT → no heard, and no orphan thinking blip (H2 wart).
+    s = make_session(FakeBrain([[BrainEvent(kind="text", text="x")]]), stt=FakeSTT(text="a"))
+    await s.start()
+    await _drive_utterance(s)
+    assert not any(e["type"] == "heard" for e in s._events)
+    assert not any(e["type"] == "state" and e.get("value") == "thinking" for e in s._events)
+
+
+@pytest.mark.asyncio
+async def test_sparse_false_voiced_frames_do_not_barge():
+    # H3: isolated voiced frames spread across a long reply must NOT accumulate to
+    # a spurious barge — the decay window resets the tally after a silence gap.
+    s = make_session(FakeBrain([[BrainEvent(kind="text", text="This is a fairly long spoken reply.")]]))
+    await s.start()
+    await s.on_mic(True)
+    s.state = "speaking"          # simulate mid-speech
+    s._active_say_id = 1
+    for _ in range(30):          # 1 voiced frame every ~120 ms (well past the 100 ms decay)
+        await s.on_mic_frame(_voiced())
+        for _ in range(6):
+            await s.on_mic_frame(_silent())
+    assert not any(e["type"] == "say_cancel" and e.get("reason") == "barge_in"
+                   for e in s._events)
