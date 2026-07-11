@@ -1,9 +1,16 @@
 """voice-session.v1 websocket server (engine side).
 
 Wraps a VoiceSession per connection with the wire protocol: the 16-byte binary
-frame header (§2), hello/ready, JSON control/event messages (§5), clock-sync
-time_ping (§8), and best-effort session resume (§9). Providers (STT/TTS/brain)
-are injected via a factory so tests drive fakes and the 5090 runs the real stack.
+frame header (§2), hello/ready, JSON control/event messages (§5), and clock-sync
+time_ping (§8). Providers (STT/TTS/brain) are injected via a factory so tests
+drive fakes and the 5090 runs the real stack.
+
+§9 session resume is NOT implemented yet: every `hello` builds a fresh session
+and `ready.resumed` is always false. `session_ttl_s` is advertised but no session
+store retains state across a reconnect, and the engine does not send `bye` on
+shutdown/supersede. A reconnect after a network blip therefore loses conversation
+context (the client survives — §9 permits resumed:false — but the context is gone).
+Full resume + supersession is a tracked gap, not a claim this file makes.
 
 Run live:  python -m engine.server --host 0.0.0.0 --port 8788
 """
@@ -45,6 +52,15 @@ def _clamp_int(v, default: int, lo: int, hi: int) -> int:
         return max(lo, min(hi, int(v)))
     except (TypeError, ValueError):
         return default
+
+
+def _p90(samples: list[float]) -> float:
+    """90th-percentile (nearest-rank) of the collected per-turn latencies."""
+    if not samples:
+        return 0.0
+    ordered = sorted(samples)
+    idx = min(len(ordered) - 1, max(0, round(0.9 * len(ordered) + 0.5) - 1))
+    return round(ordered[idx], 1)
 
 
 def _install_id() -> str:
@@ -108,6 +124,7 @@ class _Conn:
         self._t_eos: float | None = None
         self._first_audio_seen = False
         self.eos_to_first_audio_ms: float | None = None
+        self._latency_samples: list[float] = []  # per-turn EOS→first-audio, for a real p90
         self.turns = 0
         self._prev_state: str | None = None
 
@@ -116,6 +133,7 @@ class _Conn:
         if etype == "audio":
             if not self._first_audio_seen and self._t_eos is not None:
                 self.eos_to_first_audio_ms = (time.perf_counter() - self._t_eos) * 1000
+                self._latency_samples.append(self.eos_to_first_audio_ms)
                 self._first_audio_seen = True
                 print(f"[engine] EOS→first-audio {self.eos_to_first_audio_ms:.0f}ms "
                       f"(budget 1200ms)", flush=True)
@@ -139,8 +157,11 @@ class _Conn:
             value = e.get("value")
             if value == "listening" and self._prev_state == "speaking":
                 self.turns += 1
-                lat = ({"eos_to_first_audio_p90": round(self.eos_to_first_audio_ms, 1)}
-                       if self.eos_to_first_audio_ms is not None else None)
+                # A genuine running p90 over the session's samples — not the last
+                # turn's value mislabeled as p90 (the master plan's "measured, not
+                # vibed" release gate depends on this being real).
+                lat = ({"eos_to_first_audio_p90": _p90(self._latency_samples)}
+                       if self._latency_samples else None)
                 emit_telemetry("turn.complete", actor_type="human",
                                actor_id=self.actor_id, session_id=self.session_id, model=self.model or None,
                                latency_ms=lat)
@@ -312,6 +333,15 @@ class VoiceServer:
             conn.offset = t_client - (t0 + rtt / 2)
 
     async def serve(self, host: str = "0.0.0.0", port: int = 8788):
+        # A non-loopback bind + the permissive DevAuthorizer = anyone who reaches
+        # this port gets a full brain session billed to the dev Mind key. Warn
+        # loudly; the fix is WINDYTALK_STRICT_AUTH=1 or an access-gated tunnel.
+        from auth.eternitas import DevAuthorizer
+        if host not in ("127.0.0.1", "localhost", "::1") and isinstance(self.authorizer, DevAuthorizer):
+            print(f"[engine] WARNING: bound to {host} with the fail-OPEN dev gate — "
+                  "anyone reaching this port gets a brain session on the dev key. "
+                  "Set WINDYTALK_STRICT_AUTH=1 or keep the tunnel access-gated.",
+                  flush=True)
         # §1: deflate off for binary audio (pure latency/CPU tax); cap frame size
         # so a pre-hello client can't buffer a giant frame (memory DoS).
         return await websockets.serve(self.handle, host, port,

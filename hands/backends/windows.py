@@ -18,6 +18,7 @@ UIAutomationClient + System.Windows.Forms both load.
 from __future__ import annotations
 
 import base64
+import shutil
 import subprocess
 
 from .base import HandsBackend
@@ -32,15 +33,19 @@ _APP_ALIASES = {
 }
 
 # friendly key names → SendKeys tokens. Modifiers: ^ ctrl, % alt, + shift.
+# SendKeys has NO token for the Windows/Start key — super/win/meta are dropped
+# (a no-op) rather than silently mismapped to Ctrl, which would fire the wrong chord.
 _SK_MODS = {"ctrl": "^", "control": "^", "alt": "%", "option": "%",
-            "shift": "+", "cmd": "^", "super": "^", "win": "^", "meta": "^"}
+            "shift": "+", "cmd": "^"}
+_SK_DROP = {"super", "win", "meta"}  # unreachable via SendKeys; ignored, not mismapped
 _SK_KEYS = {
     "return": "{ENTER}", "enter": "{ENTER}", "tab": "{TAB}", "escape": "{ESC}",
     "esc": "{ESC}", "space": " ", "delete": "{DEL}", "del": "{DEL}",
     "backspace": "{BACKSPACE}", "up": "{UP}", "down": "{DOWN}", "left": "{LEFT}",
     "right": "{RIGHT}", "home": "{HOME}", "end": "{END}", "pageup": "{PGUP}",
     "pagedown": "{PGDN}", "f1": "{F1}", "f2": "{F2}", "f3": "{F3}", "f4": "{F4}",
-    "f5": "{F5}", "f11": "{F11}", "f12": "{F12}",
+    "f5": "{F5}", "f6": "{F6}", "f7": "{F7}", "f8": "{F8}", "f9": "{F9}",
+    "f10": "{F10}", "f11": "{F11}", "f12": "{F12}",
 }
 
 
@@ -55,6 +60,13 @@ def _ps(script: str, timeout: float = 20) -> str:
     return (r.stdout or "").strip()
 
 
+def _sq(s: str) -> str:
+    """Escape a string for a PowerShell single-quoted literal ('' == one quote).
+    Without this, a quote in an agent-supplied app name / URL breaks out of the
+    literal into arbitrary PowerShell (RCE) at auto_allow tier."""
+    return s.replace("'", "''")
+
+
 def _sk_escape(text: str) -> str:
     # SendKeys treats + ^ % ~ ( ) { } [ ] specially → wrap them in braces.
     out = []
@@ -67,16 +79,19 @@ class WindowsBackend(HandsBackend):
     name = "windows"
 
     def capabilities(self) -> dict[str, bool]:
-        # All primitives ship with Windows; assume present (probe is cheap at call).
+        # Every primitive is built on PowerShell + in-box .NET assemblies, so the one
+        # real dependency is that `powershell` is on PATH. If it isn't (PowerShell-7-
+        # only "pwsh" box), be honest and report nothing works rather than assume-True.
         from .base import TOOL_NAMES
-        return {t: True for t in TOOL_NAMES}
+        has_ps = shutil.which("powershell") is not None
+        return {t: has_ps for t in TOOL_NAMES}
 
     # -- apps / web ------------------------------------------------------------
 
     def open_app(self, name: str) -> str:
         target = _APP_ALIASES.get(name.strip().lower(), name)
         try:
-            _ps(f"Start-Process '{target}'")
+            _ps(f"Start-Process '{_sq(target)}'")
             return f"Opening {name}"
         except Exception:
             return f"Couldn't find an app called {name!r}."
@@ -84,7 +99,7 @@ class WindowsBackend(HandsBackend):
     def open_url(self, url: str) -> str:
         if not url.startswith(("http://", "https://")):
             url = "https://" + url
-        _ps(f"Start-Process '{url}'")
+        _ps(f"Start-Process '{_sq(url)}'")
         return f"Opening {url}"
 
     def web_search(self, query: str) -> str:
@@ -102,7 +117,8 @@ class WindowsBackend(HandsBackend):
         return f"Typed {n} character{'s' if n != 1 else ''}"
 
     def press_keys(self, combo: str) -> str:
-        parts = [p.strip().lower() for p in combo.replace(" ", "").split("+") if p.strip()]
+        parts = [p.strip().lower() for p in combo.replace(" ", "").split("+")
+                 if p.strip() and p.strip().lower() not in _SK_DROP]
         mods = "".join(_SK_MODS[p] for p in parts if p in _SK_MODS)
         keys = "".join(_SK_KEYS.get(p, p) for p in parts if p not in _SK_MODS)
         seq = (mods + "(" + keys + ")") if mods else keys

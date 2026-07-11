@@ -8,6 +8,7 @@
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",
     "test": "tsc -p tsconfig.build.json && node --test dist/test/*.test.js",
+    "prestart": "npm run build",
     "start": "electron ."
   },
   "devDependencies": {

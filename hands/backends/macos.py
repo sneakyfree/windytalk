@@ -61,6 +61,13 @@ def _cliclick(*args: str, timeout: float = 10) -> None:
     subprocess.run(["cliclick", *args], check=True, capture_output=True, timeout=timeout)
 
 
+def _osa_str(s: str) -> str:
+    """Escape a Python string for safe embedding inside an AppleScript "..." literal.
+    Without this, a `"` in an agent-supplied app name / element label breaks out of
+    the literal into arbitrary AppleScript (→ `do shell script` RCE) at auto_allow."""
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
 class MacOSBackend(HandsBackend):
     name = "macos"
 
@@ -87,7 +94,7 @@ class MacOSBackend(HandsBackend):
             return f"Opening {app}"
         # fall back to Spotlight-style launch via System Events
         try:
-            _osa(f'tell application "{app}" to activate')
+            _osa(f'tell application "{_osa_str(app)}" to activate')
             return f"Opening {app}"
         except Exception:
             return f"Couldn't find an app called {name!r}."
@@ -188,7 +195,7 @@ class MacOSBackend(HandsBackend):
         return "On screen:\n" + "\n".join(lines) if lines else "The active app exposes no accessible text."
 
     def click_element(self, label: str) -> str:
-        want = label.strip()
+        want = _osa_str(label.strip())
         script = (
             'tell application "System Events"\n'
             ' set p to first process whose frontmost is true\n'

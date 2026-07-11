@@ -51,9 +51,17 @@ class DevAuthorizer(Authorizer):
     the dev-key scrub (both Grant-gated) land."""
 
     def authorize(self, auth: dict | None) -> Entitlement:
-        user_id = (auth or {}).get("user_id") or (auth or {}).get("token") or "dev"
-        return Entitlement(entitled=True, user_id=str(user_id)[:64], tier="dev",
-                           reason="dev mode (gate inert)")
+        a = auth or {}
+        user_id = a.get("user_id")
+        if not user_id and a.get("token"):
+            # NEVER let the raw token become the telemetry actor_id (content-free
+            # ≠ credential-free): a passport/EPT would land whole in the admin
+            # ingest. Derive a stable opaque id instead — distinguishable, not the
+            # credential.
+            import hashlib
+            user_id = "dev-" + hashlib.sha256(a["token"].encode()).hexdigest()[:12]
+        return Entitlement(entitled=True, user_id=str(user_id or "dev")[:64],
+                           tier="dev", reason="dev mode (gate inert)")
 
 
 class EternitasAuthorizer(Authorizer):

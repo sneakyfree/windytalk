@@ -98,6 +98,28 @@ def _atspi():
 class LinuxBackend(HandsBackend):
     name = "linux"
 
+    def capabilities(self) -> dict[str, bool]:
+        # Honest per-tool probe: report what this box can actually do, so the agent
+        # gets a graceful `unsupported` instead of a raw exception (PORTABILITY.md /
+        # GET /capabilities promise this reflects reality, not an assumption).
+        input_ok = shutil.which("xdotool") is not None or shutil.which("ydotool") is not None
+        has_atspi = False
+        try:  # AT-SPI drives read/click; absent gi means blind
+            import gi  # noqa: F401
+            has_atspi = True
+        except Exception:
+            has_atspi = False
+        has_shot = any(shutil.which(c) for c in ("scrot", "import", "gnome-screenshot", "flameshot"))
+        has_launch = shutil.which("gtk-launch") is not None
+        has_xdg = shutil.which("xdg-open") is not None
+        return {
+            "open_app": has_launch or has_xdg, "open_url": has_xdg, "web_search": has_xdg,
+            "type_text": input_ok, "press_keys": input_ok,
+            "mouse_click": input_ok, "scroll": input_ok,
+            "click_element": has_atspi and input_ok, "read_screen": has_atspi,
+            "list_apps": has_atspi, "screenshot": has_shot, "run_shell": True,
+        }
+
     # -- keyboard / mouse ------------------------------------------------------
 
     def press_keys(self, combo: str) -> str:
