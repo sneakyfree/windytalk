@@ -119,10 +119,14 @@ export class RecoveryCoordinator {
 
     // 1) LOCK. enter_safe_mode may PREEMPT a held lock (the escape hatch for a
     //    stuck state): the preempted handler is abandoned, its result discarded.
+    //    The reclaim is DEFERRED to grant() so a preempt that is then
+    //    rate-limited/debounced does NOT clear the lock (which would abandon the
+    //    holder AND free the lock for a concurrent recovery without ever
+    //    entering safe mode).
+    let preemptEpoch: number | null = null;
     if (lock) {
       if (tool === "enter_safe_mode") {
-        this.abandonedEpochs.add(lock.epoch);
-        this.lock = null; // reclaimed below by grant()
+        preemptEpoch = lock.epoch;
       } else if (isHolder || CONFIG_TOOLS.has(tool)) {
         // Holders fail fast (never queue, never run concurrently); config set_*
         // tools are blocked too (a recovery would overwrite their change).
@@ -159,10 +163,22 @@ export class RecoveryCoordinator {
       };
     }
 
-    return this.grant(tool, isHolder ? nowMs : 0, charge);
+    return this.grant(tool, isHolder ? nowMs : 0, charge, preemptEpoch);
   }
 
-  private grant(tool: string, lockAt: number, charge: (() => void) | null = null): GateOutcome {
+  private grant(
+    tool: string,
+    lockAt: number,
+    charge: (() => void) | null = null,
+    preemptEpoch: number | null = null,
+  ): GateOutcome {
+    // Reclaim only now that the call has passed every gate check (lock +
+    // debounce + ceiling): a rejected preempt above never reaches here, so it
+    // leaves the held lock — and its holder — untouched.
+    if (preemptEpoch !== null) {
+      this.abandonedEpochs.add(preemptEpoch);
+      if (this.lock?.epoch === preemptEpoch) this.lock = null;
+    }
     let epoch = 0;
     if (lockAt > 0) {
       epoch = ++this.epochCounter;

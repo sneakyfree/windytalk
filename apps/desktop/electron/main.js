@@ -269,14 +269,17 @@ async function bootControlPlane() {
         ? ["Allow", "Always (this session)", "Don't allow"]
         : ["Allow", "Don't allow"];
       const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
+      const cancelIndex = buttons.length - 1;
       const opts = {
         type: "question",
         title: "Windy Talk",
         message: "Your assistant wants to make a change",
         detail: message,
         buttons,
-        defaultId: 0,
-        cancelId: buttons.length - 1,
+        // Default to "Don't allow": a stray Enter / focus-steal / auto-select
+        // must NOT authorize a change (defense in depth for the floor tools).
+        defaultId: cancelIndex,
+        cancelId: cancelIndex,
         noLink: true,
       };
       const t0 = Date.now();

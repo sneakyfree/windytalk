@@ -25,6 +25,15 @@ export function scrubShortError(raw: string | null): string | null {
   // Cut at transcript markers (conversation text must never ride along).
   const saidIdx = s.search(/\b(?:said|says|heard|asked|replied|told me|user text)\b/i);
   if (saidIdx >= 0) s = s.slice(0, saidIdx) + "[scrubbed]";
+  // Network identifiers (diagnostics_privacy.never lists IP/MAC/SSID). A raw
+  // socket error like "ECONNREFUSED 192.168.1.50:8788" would otherwise leak a
+  // private address to a third-party brain. Redact BEFORE the hex pass (a MAC
+  // and an IPv6 group would partly survive the generic hex rule).
+  s = s.replace(/\b(?:[0-9a-fA-F]{1,2}[:-]){5}[0-9a-fA-F]{1,2}\b/g, "<mac>"); // MAC
+  s = s.replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, "<ip>"); // IPv4
+  s = s.replace(/\b(?:[0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}\b/g, "<ip>"); // IPv6 (incl. ::)
+  s = s.replace(/\b[\w.+-]+@[\w-]+(?:\.[\w-]+)+\b/g, "<email>"); // email
+  s = s.replace(/\bSSID\s+\S+/gi, "SSID <ssid>"); // labeled SSID
   // Secrets/tokens: long hex or base64-ish runs -> ***
   s = s.replace(/\b[0-9a-fA-F]{16,}\b/g, "***");
   s = s.replace(/\b[A-Za-z0-9+/_-]{24,}={0,2}\b/g, "***");

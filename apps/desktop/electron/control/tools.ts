@@ -190,39 +190,45 @@ export class ControlTools {
     // rate-limited call never pointlessly prompts). Layer 1 is not an agent;
     // its autonomic actions never prompt. preconfirmed = the physical Reset
     // button, whose own dialog IS the confirmation.
+    // Everything from here holds the lock, so a single try/finally guarantees
+    // exactly one release even if the CONFIRMER rejects (else the lock would
+    // leak until its 30 s/90 s ceiling). `abandoned` is read INSIDE the finally,
+    // BEFORE release(), because release() clears the abandoned flag.
     let notifyAfter = false;
-    if (!opts.layer1 && !opts.preconfirmed) {
-      const decision = resolveTier(tool, args, {
-        currentAutonomy: this.deps.config.getActive().autonomy,
-        sessionGrants: this.sessionGrants,
-      });
-      if (decision.action === "allow") {
-        notifyAfter = decision.notify_after && MUTATING.has(tool);
-      } else {
-        const outcome = await this.deps.confirm({
-          tool,
-          message: CONFIRM_MESSAGES[tool] ?? `Allow the assistant to run ${tool}?`,
-          allowSessionGrant: decision.session_grant_allowed,
+    let res: Envelope;
+    let abandoned = false;
+    try {
+      if (!opts.layer1 && !opts.preconfirmed) {
+        const decision = resolveTier(tool, args, {
+          currentAutonomy: this.deps.config.getActive().autonomy,
+          sessionGrants: this.sessionGrants,
         });
-        if (outcome === "allow_session" && decision.session_grant_allowed) {
-          this.sessionGrants.add(tool); // granted by the USER via the confirmer
-        } else if (outcome !== "allow" && outcome !== "allow_session") {
-          // deny, or fail-CLOSED when even a native dialog can't render.
-          gate.ticket.release();
-          return { ok: false, error: "denied" };
+        if (decision.action === "allow") {
+          notifyAfter = decision.notify_after && MUTATING.has(tool);
+        } else {
+          const outcome = await this.deps.confirm({
+            tool,
+            message: CONFIRM_MESSAGES[tool] ?? `Allow the assistant to run ${tool}?`,
+            allowSessionGrant: decision.session_grant_allowed,
+          });
+          if (outcome === "allow_session" && decision.session_grant_allowed) {
+            this.sessionGrants.add(tool); // granted by the USER via the confirmer
+          } else if (outcome !== "allow" && outcome !== "allow_session") {
+            // deny, or fail-CLOSED when even a native dialog can't render. The
+            // finally releases the lock; no counters were charged (no commit).
+            return { ok: false, error: "denied" };
+          }
         }
       }
-    }
-    gate.ticket.commit(); // the call EXECUTES: charge debounce/ceiling now
-    let res: Envelope;
-    try {
+      gate.ticket.commit(); // the call EXECUTES: charge debounce/ceiling now
       res = await this.execute(tool, args);
     } catch (e) {
       res = { ok: false, error: `${(e as Error)?.name ?? "Error"}: ${scrubShortError(String((e as Error)?.message ?? e))}` };
     } finally {
+      abandoned = gate.ticket.abandoned;
       gate.ticket.release();
     }
-    if (gate.ticket.abandoned) {
+    if (abandoned) {
       // Preempted by enter_safe_mode: the handler was abandoned, its result
       // discarded (recovery_coordinator.lock.preempt).
       if (MUTATING.has(tool)) {
@@ -347,6 +353,13 @@ export class ControlTools {
         return { ok: true, result: "cache cleared — reconnecting (settings and history kept)" };
       }
       case "restart_app": {
+        // Capability-gated (platform_note): without an armed resurrection
+        // service the exit would STRAND the user — nothing relaunches. Refuse
+        // honestly rather than exit into a black hole (get_capabilities reports
+        // this same false, but an agent may skip it).
+        if (!this.deps.resurrectionArmed()) {
+          return { ok: false, error: "unsupported", result: "keep-alive protection is off — restarting could strand the app; repair it first" };
+        }
         // response_ordering: reply {ok:true,'restarting'}, FLUSH, act >=250 ms
         // later — never in-handler. The exit removes the heartbeat so the OS
         // service relaunches immediately (the ONE relaunch path).
@@ -364,10 +377,18 @@ export class ControlTools {
         setTimeout(() => this.deps.restartApp(), 350); // response_ordering
         return { ok: true, result: "restarting" };
       }
-      case "set_audio_input":
-        return this.setDial({ audio_input_id: String(args.device_id) });
-      case "set_audio_output":
-        return this.setDial({ audio_output_id: String(args.device_id) });
+      case "set_audio_input": {
+        if (typeof args.device_id !== "string" || !args.device_id) {
+          return { ok: false, error: "invalid device_id: expected a non-empty string from list_audio_devices" };
+        }
+        return this.setDial({ audio_input_id: args.device_id });
+      }
+      case "set_audio_output": {
+        if (typeof args.device_id !== "string" || !args.device_id) {
+          return { ok: false, error: "invalid device_id: expected a non-empty string from list_audio_devices" };
+        }
+        return this.setDial({ audio_output_id: args.device_id });
+      }
       case "set_volume": {
         const level = Number(args.level);
         if (!Number.isInteger(level) || level < 0 || level > 100) {
