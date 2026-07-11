@@ -1,9 +1,10 @@
-// The :8782 control host — slice 0 ships the FULL security wall (the proven
-// hands/surface.py gate, re-expressed in TS per BUILD_NOTES §3) plus the two
-// endpoints slice 0 needs:
+// The :8782 control host — the FULL security wall (the proven hands/surface.py
+// gate, re-expressed in TS per BUILD_NOTES §3) serving:
 //   GET  /ping            -> serving-attesting echo (heartbeat + staleness probe)
 //   POST /instance/hello  -> single-instance ack: focuses the window, echoes pid
-// Slice 1 grows /tools, /invoke and real MCP on this same wall.
+//   GET  /tools           -> the advertised (built) tool list          [slice 1]
+//   POST /invoke          -> {tool, args} -> {ok, result, error}       [slice 1]
+//   POST /mcp             -> MCP JSON-RPC (initialize lifecycle, tools) [slice 1]
 //
 // Serving attestation: unlike the Python reference (whose listener lives on a
 // SEPARATE daemon thread — the round-4 trap), Node handlers run ON the main
@@ -21,7 +22,12 @@ export interface ControlServerOpts {
   port?: number;
   /** Called on a valid /instance/hello ack (a second launch wants focus). */
   onFocusRequest?: () => void;
-  /** Slice 1 dispatch hook; slice 0 has no tools yet. */
+  /** Tool dispatch (slice 1+): POST /invoke {tool, args}. */
+  dispatch?: (tool: string, args: Record<string, unknown>) => Promise<unknown>;
+  /** GET /tools payload (the advertised built tools). */
+  toolList?: () => unknown[];
+  /** MCP JSON-RPC handler; null result = notification (HTTP 204). */
+  mcp?: (req: unknown) => Promise<Record<string, unknown> | null>;
   now?: () => number;
 }
 
@@ -124,7 +130,67 @@ export class ControlServer {
       });
       return;
     }
+    if (req.method === "GET" && path === "/tools" && this.opts.toolList) {
+      this.served();
+      this.send(res, 200, { tools: this.opts.toolList() });
+      return;
+    }
+    if (req.method === "POST" && path === "/invoke" && this.opts.dispatch) {
+      this.readBody(req, res, (body) => {
+        const parsed = this.parseJson(body, res);
+        if (parsed === undefined) return;
+        const tool = String((parsed as { tool?: unknown }).tool ?? "");
+        const args = ((parsed as { args?: unknown }).args as Record<string, unknown>) ?? {};
+        void this.opts
+          .dispatch!(tool, args)
+          .then((out) => {
+            this.served();
+            this.send(res, 200, out);
+          })
+          .catch((e) => this.send(res, 200, { ok: false, error: `dispatch failed: ${String(e)}` }));
+      });
+      return;
+    }
+    if (req.method === "POST" && path === "/mcp" && this.opts.mcp) {
+      this.readBody(req, res, (body) => {
+        const parsed = this.parseJson(body, res);
+        if (parsed === undefined) return;
+        void this.opts
+          .mcp!(parsed)
+          .then((out) => {
+            this.served();
+            if (out === null) {
+              res.writeHead(204).end(); // JSON-RPC notification: no body
+            } else {
+              this.send(res, 200, out);
+            }
+          })
+          .catch((e) =>
+            this.send(res, 200, {
+              jsonrpc: "2.0",
+              id: null,
+              error: { code: -32603, message: `internal: ${String(e)}` },
+            }),
+          );
+      });
+      return;
+    }
     this.send(res, 404, { error: "not found" });
+  }
+
+  /** Parse a JSON body; sends a 400 and returns undefined on bad input. */
+  private parseJson(body: string, res: http.ServerResponse): unknown {
+    try {
+      const parsed: unknown = JSON.parse(body || "{}");
+      if (typeof parsed !== "object" || parsed === null) {
+        this.send(res, 400, { error: "bad body" });
+        return undefined;
+      }
+      return parsed;
+    } catch {
+      this.send(res, 400, { error: "bad json" });
+      return undefined;
+    }
   }
 
   private served(): void {
