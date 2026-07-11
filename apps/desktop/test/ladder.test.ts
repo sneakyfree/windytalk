@@ -94,6 +94,7 @@ function harness(opts: { repairArmed?: boolean } = {}): Harness {
         : (h.repairs++, { armed: true, detail: "re-armed" }),
     restartApp: () => h.restarts.push(c.now()),
     resetCrashCounter: (why) => h.counterResets.push(why),
+    entitledBrains: () => ["opus"],
     now: c.now,
     reconnectTimeoutMs: 200,
   });

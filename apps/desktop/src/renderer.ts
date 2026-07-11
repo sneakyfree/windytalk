@@ -163,6 +163,54 @@ class RendererApp {
     BRIDGE?.control?.pushStatus({ ...this.s, lastFrameAtMs: this.lastFrameAtMs });
   }
 
+  // Apply the active config's behavioral dials (control.mcp.v1 set_* / safe
+  // mode overlay). Best-effort per dial — one failing dial must not block the
+  // rest; failures surface via status.micError / lastError, never silently.
+  private async applyConfig(cfg: {
+    hands_free?: boolean;
+    volume?: number;
+    audio_input_id?: string | null;
+    audio_output_id?: string | null;
+  }): Promise<void> {
+    if (typeof cfg.volume === "number") this.playback.setVolume(cfg.volume);
+    if (cfg.audio_output_id !== undefined && cfg.audio_output_id !== null) {
+      try {
+        await this.playback.setSink(cfg.audio_output_id);
+      } catch (e) {
+        this.emit({ lastError: `speaker switch failed: ${String((e as Error)?.message ?? e)}` });
+      }
+    }
+    if (cfg.audio_input_id !== undefined) {
+      await this.switchMic(cfg.audio_input_id);
+    }
+    if (cfg.hands_free !== undefined) void this.setWake(!!cfg.hands_free);
+  }
+
+  /** Re-open capture on a specific device (null = system default). */
+  private async switchMic(deviceId: string | null): Promise<void> {
+    try {
+      const constraints: MediaStreamConstraints = {
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          ...(deviceId && deviceId !== "default" ? { deviceId: { exact: deviceId } } : {}),
+        },
+      };
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      const old = this.micStream;
+      this.micStream = stream;
+      old?.getTracks().forEach((t) => t.stop());
+      if (this.audioCtx && this.worklet) {
+        const src = this.audioCtx.createMediaStreamSource(stream);
+        src.connect(this.worklet);
+      }
+      this.emit({ micError: null });
+    } catch (err) {
+      this.emit({ micError: String((err as Error)?.message || err) });
+    }
+  }
+
   private onSupervisorCommand(cmd: {
     type: string;
     hands_free?: boolean;
@@ -192,7 +240,12 @@ class RendererApp {
       if (this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.close();
       else this.connect();
     } else if (cmd.type === "apply-config") {
-      void this.setWake(!!cmd.hands_free); // safe mode: push-to-talk (wake off)
+      void this.applyConfig(cmd as {
+        hands_free?: boolean;
+        volume?: number;
+        audio_input_id?: string | null;
+        audio_output_id?: string | null;
+      });
     } else if (cmd.type === "notice" && cmd.text) {
       window.face?.setCaption(cmd.text, "say");
     }

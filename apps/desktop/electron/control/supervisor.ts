@@ -15,7 +15,13 @@ import type { CrashLoopDetector } from "./layer1.js";
 export type RendererCommand =
   | { type: "reconnect" }
   | { type: "deep-reconnect" }
-  | { type: "apply-config"; hands_free: boolean }
+  | {
+      type: "apply-config";
+      hands_free: boolean;
+      volume: number;
+      audio_input_id: string | null;
+      audio_output_id: string | null;
+    }
   | { type: "notice"; text: string }
   | { type: "probe"; probe: "audio-devices" | "selftest"; reqId: number };
 
@@ -139,9 +145,20 @@ export class Supervisor {
     });
   }
 
-  /** Safe-mode overlay push (factory behavior; push-to-talk = hands_free off). */
-  applyActiveConfig(active: { hands_free: boolean }): void {
-    this.opts.sendCommand({ type: "apply-config", hands_free: active.hands_free });
+  /** Push the ACTIVE config's behavioral dials to the renderer. */
+  applyActiveConfig(active: {
+    hands_free: boolean;
+    volume: number;
+    audio_input_id: string | null;
+    audio_output_id: string | null;
+  }): void {
+    this.opts.sendCommand({
+      type: "apply-config",
+      hands_free: active.hands_free,
+      volume: active.volume,
+      audio_input_id: active.audio_input_id,
+      audio_output_id: active.audio_output_id,
+    });
   }
 
   /** One calm plain sentence in the UI (design: grandma-readable without an agent). */

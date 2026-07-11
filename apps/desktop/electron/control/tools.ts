@@ -94,6 +94,12 @@ export interface ToolDeps {
   resetCrashCounter: (why: string) => void;
   /** One plain sentence to the user (autonomy 0-2 notify-after + safe-mode). */
   notify?: (text: string) => void;
+  /**
+   * The last-synced brain-entitlement CACHE (works offline, when it's most
+   * needed). 'default' is always accepted regardless. Empty = nothing synced
+   * yet, so only 'default' passes (forced-honest, never fake entitlement).
+   */
+  entitledBrains: () => string[];
   now?: () => number;
   /** reconnect's pinned block ceiling (10 s prod; injectable for tests). */
   reconnectTimeoutMs?: number;
@@ -104,6 +110,13 @@ export interface ToolDeps {
 const MUTATING = new Set([
   "reconnect", "enter_safe_mode", "exit_safe_mode", "repair_resurrection",
   "restart_engine", "restart_app", "clear_cache", "reset_to_defaults",
+  "set_audio_input", "set_audio_output", "set_volume", "set_engine_url",
+  "set_brain", "set_wake_mode", "set_autonomy",
+]);
+
+const SET_TOOLS = new Set([
+  "set_audio_input", "set_audio_output", "set_volume", "set_engine_url",
+  "set_brain", "set_wake_mode", "set_autonomy",
 ]);
 
 /** Plain-English confirm prompts (the confirmer shows these, voice or dialog). */
@@ -114,6 +127,13 @@ const CONFIRM_MESSAGES: Record<string, string> = {
   restart_app: "Restart the whole Windy Talk app?",
   clear_cache: "Clear temporary files and reconnect? Settings and history are kept.",
   reset_to_defaults: "Reset ALL settings to factory defaults? Your conversation history is kept.",
+  set_audio_input: "Switch which microphone Windy Talk listens with?",
+  set_audio_output: "Switch which speaker Windy Talk talks through?",
+  set_volume: "Mute the assistant's voice completely?",
+  set_engine_url: "Point Windy Talk at a different voice engine?",
+  set_brain: "Switch which brain answers you?",
+  set_wake_mode: "Let Windy Talk listen for 'Hey Windy' all the time?",
+  set_autonomy: "Let the assistant do more without asking first?",
 };
 
 export class ControlTools {
@@ -134,6 +154,8 @@ export class ControlTools {
       "run_selftest", "get_capabilities", "check_for_update",
       "reconnect", "enter_safe_mode", "exit_safe_mode", "repair_resurrection",
       "restart_engine", "restart_app", "clear_cache", "reset_to_defaults",
+      "set_audio_input", "set_audio_output", "set_volume", "set_engine_url",
+      "set_brain", "set_wake_mode", "set_autonomy",
     ];
   }
 
@@ -337,6 +359,45 @@ export class ControlTools {
         setTimeout(() => this.deps.restartApp(), 350); // response_ordering
         return { ok: true, result: "restarting" };
       }
+      case "set_audio_input":
+        return this.setDial({ audio_input_id: String(args.device_id) });
+      case "set_audio_output":
+        return this.setDial({ audio_output_id: String(args.device_id) });
+      case "set_volume": {
+        const level = Number(args.level);
+        if (!Number.isInteger(level) || level < 0 || level > 100) {
+          return { ok: false, error: "invalid level: must be an integer 0-100" };
+        }
+        return this.setDial({ volume: level });
+      }
+      case "set_engine_url": {
+        const url = String(args.url ?? "");
+        const verdict = this.deps.allowList.check(url);
+        if (!verdict.allowed) {
+          // The pinned template — NEVER 'denied' (that is tier refusal).
+          return { ok: false, error: `untrusted host: ${verdict.host}`, result: verdict.reason };
+        }
+        return this.setDial({ engine_url: url }, () => {
+          // A new engine only matters if we redial it (same-session re-dial).
+          void this.deps.reconnectEngine(this.deps.reconnectTimeoutMs ?? 10_000);
+        });
+      }
+      case "set_brain": {
+        const brain = String(args.brain ?? "");
+        if (brain !== "default" && !this.deps.entitledBrains().includes(brain)) {
+          return { ok: false, error: `not entitled to brain: ${brain}` };
+        }
+        return this.setDial({ brain });
+      }
+      case "set_wake_mode":
+        return this.setDial({ hands_free: args.hands_free === true });
+      case "set_autonomy": {
+        const level = Number(args.level);
+        if (!Number.isInteger(level) || level < 0 || level > 10) {
+          return { ok: false, error: "invalid level: must be an integer 0-10" };
+        }
+        return this.setDial({ autonomy: level });
+      }
       default:
         return { ok: false, error: "unsupported" };
     }
@@ -394,6 +455,22 @@ export class ControlTools {
       summary,
       suggested_fix: suggestedFix,
     };
+  }
+
+  /**
+   * One config-dial write (contract safe_mode.config_writes_in_safe_mode):
+   * always writes the UNDERLYING config; in safe mode the overlay stays
+   * factory and the pinned result string says so; otherwise the active
+   * config is pushed to the renderer (and afterApply runs).
+   */
+  private setDial(patch: Record<string, unknown>, afterApply?: () => void): Envelope {
+    this.deps.config.setSaved(patch);
+    if (this.deps.config.inSafeMode) {
+      return { ok: true, result: "saved — will apply when you leave safe mode" };
+    }
+    this.deps.applyActiveConfig();
+    afterApply?.();
+    return { ok: true, result: "saved" };
   }
 
   /**
