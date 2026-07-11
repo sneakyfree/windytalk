@@ -14,6 +14,7 @@ import type { CrashLoopDetector } from "./layer1.js";
 
 export type RendererCommand =
   | { type: "reconnect" }
+  | { type: "deep-reconnect" }
   | { type: "apply-config"; hands_free: boolean }
   | { type: "notice"; text: string }
   | { type: "probe"; probe: "audio-devices" | "selftest"; reqId: number };
@@ -90,6 +91,15 @@ export class Supervisor {
     }
   }
 
+  /**
+   * restart_engine's degraded path: drop session state, close the socket, new
+   * voice-session (distinct from reconnect, which re-dials the SAME session).
+   */
+  deepReconnectEngine(timeoutMs: number): Promise<boolean> {
+    this.opts.sendCommand({ type: "deep-reconnect" });
+    return this.awaitOnline(timeoutMs);
+  }
+
   /** The reconnect tool's engine action: command a re-dial, await online. */
   reconnectEngine(timeoutMs: number): Promise<boolean> {
     if (this.status.connection === "online") {
@@ -97,6 +107,10 @@ export class Supervisor {
       // read as online until the next liveness check), then await the outcome.
     }
     this.opts.sendCommand({ type: "reconnect" });
+    return this.awaitOnline(timeoutMs);
+  }
+
+  private awaitOnline(timeoutMs: number): Promise<boolean> {
     const now = this.opts.now ?? Date.now;
     const deadline = now() + timeoutMs;
     return new Promise((resolve) => {

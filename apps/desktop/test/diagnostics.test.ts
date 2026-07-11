@@ -64,6 +64,13 @@ function harness(): Harness {
     emit: () => {},
     logs,
     probe: async () => h.probeResult.value,
+    confirm: async () => "allow",
+    lkg: { invalidateAll() {}, write() {}, loadBest: () => null } as any,
+    deepReconnectEngine: async () => true,
+    clearCaches: async () => {},
+    repairResurrection: async () => ({ armed: true, detail: "armed" }),
+    restartApp: () => {},
+    resetCrashCounter: () => {},
     engineIsLocal: () => true,
     now: c.now,
     selftestStageTimeoutMs: 50,
@@ -179,9 +186,11 @@ test("get_capabilities: tri-state; built=true, unbuilt=false, restart_engine deg
   };
   assert.equal(caps.tools.get_health, true);
   assert.equal(caps.tools.reconnect, true);
-  assert.equal(caps.tools.exit_safe_mode, false, "unbuilt slice reads false (forced-honest)");
-  assert.equal(caps.tools.apply_update, false);
-  assert.equal(caps.tools.restart_engine, false, "unbuilt regardless of engine locality");
+  assert.equal(caps.tools.exit_safe_mode, true);
+  assert.equal(caps.tools.apply_update, false, "unbuilt slice reads false (forced-honest)");
+  assert.equal(caps.tools.set_volume, false, "config dials land in slice 4");
+  assert.equal(caps.tools.restart_engine, "degraded", "no child engine in the desktop client — deep reconnect");
+  assert.equal(caps.tools.restart_app, true, "resurrection armed in this harness");
   assert.equal(Object.keys(caps.tools).length, 24, "all 24 contract tools reported");
   cleanup(h);
 });

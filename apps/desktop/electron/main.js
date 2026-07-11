@@ -9,7 +9,7 @@ import fs from "node:fs";
 import path from "node:path";
 import http from "node:http";
 
-import { BrowserWindow, Notification, app, ipcMain } from "electron";
+import { BrowserWindow, Notification, app, dialog, ipcMain, session } from "electron";
 
 import { controlPaths } from "../dist/electron/control/paths.js";
 import { loadOrCreateToken } from "../dist/electron/control/token.js";
@@ -28,6 +28,8 @@ import { ControlTools } from "../dist/electron/control/tools.js";
 import { ControlMcp } from "../dist/electron/control/mcp.js";
 import { makeEmitter } from "../dist/electron/control/emit.js";
 import { LogRing } from "../dist/electron/control/logring.js";
+import { LkgStore } from "../dist/electron/control/lkg.js";
+import { removeHeartbeat } from "../dist/electron/control/heartbeat.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEMO = process.env.WINDYTALK_DEMO || "";
@@ -136,7 +138,11 @@ async function bootControlPlane() {
     console.log(`[windytalk] ${m}`);
     logs.append(level, m);
   };
-  configStore = new ConfigStore(paths.configDir);
+  const lkg = new LkgStore(paths.configDir);
+  configStore = new ConfigStore(paths.configDir, { fallback: () => lkg.loadBest() });
+  if (configStore.loadedFrom !== "config") {
+    slog(`config recovered from ${configStore.loadedFrom} (config.json was corrupt/absent)`, "warn");
+  }
   const allowList = new EngineAllowList(paths.configDir);
   const coordinator = new RecoveryCoordinator();
   let tools = null; // created below; the detector's trip closes over it
@@ -170,6 +176,33 @@ async function bootControlPlane() {
     emit: makeEmitter(),
     logs,
     probe: (kind, timeoutMs) => supervisor.probe(kind, timeoutMs),
+    confirm: (req) => nativeConfirm(req),
+    lkg,
+    deepReconnectEngine: (t) => supervisor.deepReconnectEngine(t),
+    clearCaches: async () => {
+      // Transient caches only: HTTP cache + shader/code caches. Settings,
+      // history, and on-device MODELS are untouched (contract clear_cache).
+      await session.defaultSession.clearCache();
+      await session.defaultSession.clearCodeCaches({ urls: [] }).catch(() => {});
+      slog("caches cleared");
+    },
+    repairResurrection: async () => {
+      const appLaunch = app.isPackaged
+        ? { cmd: process.execPath, args: [] }
+        : { cmd: process.execPath, args: [path.join(__dirname, "..")], cwd: path.join(__dirname, "..") };
+      const status = await ensureResurrection({ appLaunch, log: (m) => slog(m) });
+      resurrectionArmed = status.armed;
+      return status;
+    },
+    restartApp: () => {
+      // The single resurrection path: remove the heartbeat (tier1-absent ->
+      // immediate relaunch), exit with the distinguished code.
+      slog("restart_app: exiting via the resurrection path", "warn");
+      removeHeartbeat(paths.heartbeat);
+      app.exit(77);
+    },
+    resetCrashCounter: (why) => detector.resetCounter(why),
+    notify: (text) => supervisor.notice(text),
     engineIsLocal: () => {
       try {
         const host = new URL(configStore.getActive().engine_url).hostname;
@@ -191,6 +224,49 @@ async function bootControlPlane() {
     supervisor.onRendererStatus(status);
   });
   ipcMain.on("windytalk:probe", (_evt, { reqId, result }) => supervisor.onProbeResult(reqId, result));
+  // The physical Reset button: in-process, no HTTP, no bearer token; its
+  // in-app confirm dialog IS the always_confirm (contract consumers.the_reset_button).
+  ipcMain.handle("windytalk:reset", () => tools.dispatch("reset_to_defaults", {}, { preconfirmed: true }));
+
+  // The confirmer (security.confirmer_fallback): a native OS dialog drawn by
+  // the SUPERVISOR — reachable even when the renderer is down. Fails CLOSED
+  // ('unavailable') only if even the native dialog cannot render.
+  async function nativeConfirm({ tool, message, allowSessionGrant }) {
+    try {
+      const buttons = allowSessionGrant
+        ? ["Allow", "Always (this session)", "Don't allow"]
+        : ["Allow", "Don't allow"];
+      const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
+      const opts = {
+        type: "question",
+        title: "Windy Talk",
+        message: "Your assistant wants to make a change",
+        detail: message,
+        buttons,
+        defaultId: 0,
+        cancelId: buttons.length - 1,
+        noLink: true,
+      };
+      const shown = win ? dialog.showMessageBox(win, opts) : dialog.showMessageBox(opts);
+      // An unattended dialog must not hang the caller forever ('a denial
+      // returns denied — never silence'): 60 s with no answer = deny.
+      const timed = await Promise.race([
+        shown,
+        new Promise((r) => setTimeout(() => r(null), 60_000)),
+      ]);
+      if (timed === null) {
+        slog(`confirm for ${tool} unanswered for 60 s — denied`, "warn");
+        return "deny";
+      }
+      const { response } = timed;
+      if (response === 0) return "allow";
+      if (allowSessionGrant && response === 1) return "allow_session";
+      return "deny";
+    } catch (e) {
+      slog(`confirmer could not render (${String(e)}) — failing closed`, "error");
+      return "unavailable";
+    }
+  }
   global.__windytalkSupervisor = { supervisor, tools, configStore, detector };
 
   const server = new ControlServer({
@@ -243,6 +319,26 @@ async function bootControlPlane() {
       .then((st) => { resurrectionArmed = st.armed; })
       .catch(() => {});
   }
+
+  // LKG snapshots: after 60 s of continuous online (and not in safe mode —
+  // a safe-mode session proves the OVERLAY works, not the saved config), the
+  // saved config is a WORKING customization. LkgStore.write dedupes content.
+  let onlineSince = null;
+  setInterval(() => {
+    const online = supervisor.rendererStatus().connection === "online";
+    if (!online) {
+      onlineSince = null;
+      return;
+    }
+    if (onlineSince === null) onlineSince = Date.now();
+    if (Date.now() - onlineSince >= 60_000 && !configStore.inSafeMode) {
+      try {
+        lkg.write(configStore.getSaved());
+      } catch (e) {
+        slog(`lkg write failed: ${String(e)}`, "warn");
+      }
+    }
+  }, 30_000).unref();
 
   // A crash-looping machine relaunches INTO safe mode; say so plainly.
   if (configStore.inSafeMode) {

@@ -24,6 +24,7 @@ test("ACCEPTANCE: reconnect ×50 in a tight loop -> ≤5 execute, every other ca
   for (let i = 0; i < 50; i++) {
     const gate = coord.gate("reconnect");
     if (gate.proceed) {
+      gate.ticket.commit();
       executed++;
       outcomes.push("executed");
       c.advance(1_000); // handler runs 1 s while holding the lock
@@ -45,6 +46,7 @@ test("debounce: same tool+args within 5 s -> rate_limited; a REJECTED call does 
   const coord = new RecoveryCoordinator({ now: c.now });
   const g1 = coord.gate("run_selftest");
   assert.ok(g1.proceed);
+  g1.ticket.commit();
   g1.ticket.release();
   c.advance(3_000);
   const g2 = coord.gate("run_selftest");
@@ -57,7 +59,9 @@ test("debounce: same tool+args within 5 s -> rate_limited; a REJECTED call does 
 test("debounce key includes args: set_audio_input(A) then (B) is NOT debounced (the try-the-other-mic flow)", () => {
   const c = clock();
   const coord = new RecoveryCoordinator({ now: c.now });
-  assert.ok(coord.gate("set_audio_input", { device_id: "A" }).proceed);
+  const gA = coord.gate("set_audio_input", { device_id: "A" });
+  assert.ok(gA.proceed);
+  gA.ticket.commit();
   c.advance(100);
   const b = coord.gate("set_audio_input", { device_id: "B" });
   assert.ok(b.proceed, "different args = different debounce key");
@@ -72,6 +76,7 @@ test("ceiling: 5 executed per tool per rolling 300 s; window slides", () => {
   for (let i = 0; i < 5; i++) {
     const g = coord.gate("run_selftest");
     assert.ok(g.proceed, `call ${i} should execute`);
+    g.ticket.commit();
     g.ticket.release();
     c.advance(10_000);
   }
@@ -158,8 +163,10 @@ test("run_selftest + repair_resurrection: NOT blocked by a held lock, but rate-l
   assert.ok(held.proceed);
   const st = coord.gate("run_selftest");
   assert.ok(st.proceed, "run_selftest is lock-exempt");
+  st.ticket.commit();
   const rr = coord.gate("repair_resurrection");
   assert.ok(rr.proceed, "repair_resurrection is not lock-blocked");
+  rr.ticket.commit();
   c.advance(1_000);
   const st2 = coord.gate("run_selftest");
   assert.ok(!st2.proceed && st2.error === "rate_limited", "but it IS debounced");
@@ -173,6 +180,7 @@ test("layer1 exemption: Layer 1's calls go through the lock but are never charge
   for (let i = 0; i < 5; i++) {
     const g = coord.gate("enter_safe_mode");
     assert.ok(g.proceed);
+    g.ticket.commit();
     g.ticket.release();
     c.advance(6_000);
   }
@@ -212,4 +220,19 @@ test("recovering flag: true while a lock is held (drives get_health.mode)", () =
   assert.equal(coord.lockHolderTool, "reconnect");
   g.ticket.release();
   assert.equal(coord.recovering, false);
+});
+
+test("a DENIED call never charges the executed counters (commit is post-confirmer)", () => {
+  const c = clock();
+  const coord = new RecoveryCoordinator({ now: c.now });
+  // Gate passes but the user denies -> no commit -> no debounce window starts.
+  const g1 = coord.gate("restart_engine");
+  assert.ok(g1.proceed);
+  g1.ticket.release(); // denied: released without commit
+  const g2 = coord.gate("restart_engine");
+  assert.ok(g2.proceed, "an uncommitted (denied) call must not debounce the next one");
+  g2.ticket.commit();
+  g2.ticket.release();
+  const g3 = coord.gate("restart_engine");
+  assert.ok(!g3.proceed && g3.error === "rate_limited", "the EXECUTED call does debounce");
 });

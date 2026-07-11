@@ -86,6 +86,13 @@ test("HTTP routes: /tools, /invoke, /mcp all behind the wall; MCP notification -
     startedAtMs: Date.now(),
     emit: () => {},
     logs: new LogRing(),
+    confirm: async () => "allow",
+    lkg: { invalidateAll() {}, write() {}, loadBest: () => null } as any,
+    deepReconnectEngine: async () => true,
+    clearCaches: async () => {},
+    repairResurrection: async () => ({ armed: true, detail: "armed" }),
+    restartApp: () => {},
+    resetCrashCounter: () => {},
     probe: async () => null,
   });
   const mcp = new ControlMcp({ tools, version: "t" });

@@ -93,6 +93,8 @@
     <div class="prow"><span class="k">Hands URL</span><span class="v" id="p-hands">—</span></div>
     <div class="prow"><span class="k">Version</span><span class="v" id="p-ver">—</span></div>
     <div class="prow"><span class="k">Last error</span><span class="v" id="p-err">none</span></div>
+    <button id="reset-btn" style="margin-top:14px;width:100%;padding:10px;border-radius:8px;border:1px solid #b33;background:transparent;color:#e66;font:inherit;cursor:pointer;">Reset Windy Talk</button>
+    <div style="margin-top:6px;font-size:11px;opacity:.55;text-align:center;">Restores factory settings. Your conversations are kept.</div>
   </div>
   <div id="footer">the voice of every agent</div>
 </div>
@@ -108,6 +110,15 @@
     d.style.background = d.style.color = cssv(on ? (color || "--green") : "--off");
   }
   document.getElementById("close").onclick = () => (window.wt ? window.wt.quit() : window.close && window.close());
+  // The physical Reset button: always works, in-process, no agent, no token.
+  // Its confirm dialog IS the always_confirm (control.mcp.v1 the_reset_button).
+  document.getElementById("reset-btn").onclick = async () => {
+    const sure = confirm("Reset ALL settings to factory defaults?\n\nYour conversation history is kept. Windy Talk will restart.");
+    if (!sure) return;
+    if (window.windytalk && window.windytalk.control && window.windytalk.control.reset) {
+      await window.windytalk.control.reset();
+    }
+  };
   const gear = document.getElementById("gear"), panel = document.getElementById("panel");
   gear.onclick = () => panel.classList.toggle("open");
 

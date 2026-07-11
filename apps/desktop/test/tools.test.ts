@@ -68,6 +68,13 @@ function harness(): Harness {
     startedAtMs: c.now() - 60_000,
     emit: (f) => emitted.push(f),
     logs: new LogRing({ now: c.now }),
+    confirm: async () => "allow",
+    lkg: { invalidateAll() {}, write() {}, loadBest: () => null } as any,
+    deepReconnectEngine: async () => true,
+    clearCaches: async () => {},
+    repairResurrection: async () => ({ armed: true, detail: "armed" }),
+    restartApp: () => {},
+    resetCrashCounter: () => {},
     probe: async () => null,
     now: c.now,
     reconnectTimeoutMs: 500,
@@ -180,7 +187,7 @@ test("dispatch: unknown tool vs contract-but-unbuilt tool are distinct honest er
   const h = harness();
   const unknown = await h.tools.dispatch("frobnicate");
   assert.equal(unknown.error, "unknown tool: frobnicate");
-  const unbuilt = await h.tools.dispatch("exit_safe_mode");
+  const unbuilt = await h.tools.dispatch("set_volume", { level: 50 });
   assert.equal(unbuilt.error, "unsupported");
   assert.match(String(unbuilt.result), /not built yet/);
   fs.rmSync(h.dir, { recursive: true, force: true });
@@ -226,9 +233,10 @@ test("MCP: tools/list advertises exactly the built tools, with the contract's de
   assert.deepEqual(
     tools.map((t) => t.name).sort(),
     [
-      "check_for_update", "enter_safe_mode", "get_capabilities", "get_config",
-      "get_health", "get_logs", "get_status", "list_audio_devices",
-      "reconnect", "run_selftest",
+      "check_for_update", "clear_cache", "enter_safe_mode", "exit_safe_mode",
+      "get_capabilities", "get_config", "get_health", "get_logs", "get_status",
+      "list_audio_devices", "reconnect", "repair_resurrection", "reset_to_defaults",
+      "restart_app", "restart_engine", "run_selftest",
     ],
   );
   const contract = loadContractTools();

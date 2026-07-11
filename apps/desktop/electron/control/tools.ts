@@ -13,8 +13,10 @@ import type { ConfigStore } from "./config.js";
 import type { CrashLoopDetector } from "./layer1.js";
 import type { EngineAllowList } from "./engine-allow.js";
 import { emitControlAction, type Emitter } from "./emit.js";
+import type { LkgStore } from "./lkg.js";
 import type { LogRing } from "./logring.js";
 import { scrubDeviceName, scrubShortError } from "./scrub.js";
+import { resolveTier } from "./tier.js";
 
 export interface Envelope {
   ok: boolean;
@@ -43,6 +45,19 @@ export const OFFLINE_STATUS: RendererStatus = {
   lastFrameAtMs: null,
 };
 
+/**
+ * The confirmer (contract tiers + security.confirmer_fallback): a voice/tap
+ * confirm when the app UI is up, a minimal NATIVE OS dialog from the
+ * supervisor when it is not. 'unavailable' (truly headless) fails CLOSED.
+ * 'allow_session' is the USER granting a session upgrade — never offered for
+ * floor calls (the caller sets allowSessionGrant accordingly).
+ */
+export type Confirmer = (req: {
+  tool: string;
+  message: string;
+  allowSessionGrant: boolean;
+}) => Promise<"allow" | "allow_session" | "deny" | "unavailable">;
+
 export interface ToolDeps {
   coordinator: RecoveryCoordinator;
   config: ConfigStore;
@@ -62,6 +77,23 @@ export interface ToolDeps {
   probe: (kind: "audio-devices" | "selftest", timeoutMs: number) => Promise<unknown | null>;
   /** Is the engine a local child on THIS box (drives restart_engine's tri-state)? */
   engineIsLocal?: () => boolean;
+  confirm: Confirmer;
+  lkg: LkgStore;
+  /** Deep reconnect: drop session state, new voice-session (restart_engine). */
+  deepReconnectEngine: (timeoutMs: number) => Promise<boolean>;
+  /** Clear transient caches (Electron session cache; models excluded). */
+  clearCaches: () => Promise<void>;
+  /** Re-arm the resurrection service (the single serialized repair routine). */
+  repairResurrection: () => Promise<{ armed: boolean; detail: string }>;
+  /**
+   * Exit via the single resurrection path (response_ordering: called >=250 ms
+   * after the response flushed; removes the heartbeat, exits distinguished).
+   */
+  restartApp: () => void;
+  /** Reset the crash-loop counter (reset_to_defaults / exit_safe_mode). */
+  resetCrashCounter: (why: string) => void;
+  /** One plain sentence to the user (autonomy 0-2 notify-after + safe-mode). */
+  notify?: (text: string) => void;
   now?: () => number;
   /** reconnect's pinned block ceiling (10 s prod; injectable for tests). */
   reconnectTimeoutMs?: number;
@@ -69,11 +101,26 @@ export interface ToolDeps {
   selftestStageTimeoutMs?: number;
 }
 
-const MUTATING = new Set(["reconnect", "enter_safe_mode"]);
+const MUTATING = new Set([
+  "reconnect", "enter_safe_mode", "exit_safe_mode", "repair_resurrection",
+  "restart_engine", "restart_app", "clear_cache", "reset_to_defaults",
+]);
+
+/** Plain-English confirm prompts (the confirmer shows these, voice or dialog). */
+const CONFIRM_MESSAGES: Record<string, string> = {
+  exit_safe_mode: "Leave safe mode and turn your saved settings (including hands) back on?",
+  repair_resurrection: "Re-install Windy Talk's keep-alive protection?",
+  restart_engine: "Restart the voice engine session?",
+  restart_app: "Restart the whole Windy Talk app?",
+  clear_cache: "Clear temporary files and reconnect? Settings and history are kept.",
+  reset_to_defaults: "Reset ALL settings to factory defaults? Your conversation history is kept.",
+};
 
 export class ControlTools {
   private readonly deps: ToolDeps;
   private readonly now: () => number;
+  /** Session-scoped always-allow grants — granted by the USER, never an agent. */
+  private sessionGrants = new Set<string>();
 
   constructor(deps: ToolDeps) {
     this.deps = deps;
@@ -85,19 +132,51 @@ export class ControlTools {
     return [
       "get_health", "get_status", "get_config", "get_logs", "list_audio_devices",
       "run_selftest", "get_capabilities", "check_for_update",
-      "reconnect", "enter_safe_mode",
+      "reconnect", "enter_safe_mode", "exit_safe_mode", "repair_resurrection",
+      "restart_engine", "restart_app", "clear_cache", "reset_to_defaults",
     ];
   }
 
-  async dispatch(tool: string, args: Record<string, unknown> = {}, opts: { layer1?: boolean } = {}): Promise<Envelope> {
+  async dispatch(
+    tool: string,
+    args: Record<string, unknown> = {},
+    opts: { layer1?: boolean; preconfirmed?: boolean } = {},
+  ): Promise<Envelope> {
     if (!this.isContractTool(tool)) return { ok: false, error: `unknown tool: ${tool}` };
     if (!this.builtTools().includes(tool)) {
       return { ok: false, error: "unsupported", result: "not built yet (control.mcp.v1 build in progress)" };
     }
     const gate = this.deps.coordinator.gate(tool, args, opts);
     if (!gate.proceed) return { ok: false, error: gate.error, result: gate.reason };
-    // (tier confirmer would run HERE — after the coordinator, per check_order.
-    //  Slice-1 tools are auto_allow; slice 4 wires tier_resolution.)
+
+    // Tier confirmer — AFTER the coordinator (check_order: a lock-blocked or
+    // rate-limited call never pointlessly prompts). Layer 1 is not an agent;
+    // its autonomic actions never prompt. preconfirmed = the physical Reset
+    // button, whose own dialog IS the confirmation.
+    let notifyAfter = false;
+    if (!opts.layer1 && !opts.preconfirmed) {
+      const decision = resolveTier(tool, args, {
+        currentAutonomy: this.deps.config.getActive().autonomy,
+        sessionGrants: this.sessionGrants,
+      });
+      if (decision.action === "allow") {
+        notifyAfter = decision.notify_after && MUTATING.has(tool);
+      } else {
+        const outcome = await this.deps.confirm({
+          tool,
+          message: CONFIRM_MESSAGES[tool] ?? `Allow the assistant to run ${tool}?`,
+          allowSessionGrant: decision.session_grant_allowed,
+        });
+        if (outcome === "allow_session" && decision.session_grant_allowed) {
+          this.sessionGrants.add(tool); // granted by the USER via the confirmer
+        } else if (outcome !== "allow" && outcome !== "allow_session") {
+          // deny, or fail-CLOSED when even a native dialog can't render.
+          gate.ticket.release();
+          return { ok: false, error: "denied" };
+        }
+      }
+    }
+    gate.ticket.commit(); // the call EXECUTES: charge debounce/ceiling now
     let res: Envelope;
     try {
       res = await this.execute(tool, args);
@@ -116,6 +195,10 @@ export class ControlTools {
     }
     if (MUTATING.has(tool) && !opts.layer1) {
       emitControlAction(this.deps.emit, { tool, ok: res.ok, error: res.error, mode: this.mode() });
+    }
+    if (notifyAfter && res.ok) {
+      // autonomy 0-2: even auto_allow recovery tools notify the user AFTER acting.
+      this.deps.notify?.(`I ran ${tool.replace(/_/g, " ")} to keep things working.`);
     }
     return res;
   }
@@ -205,6 +288,54 @@ export class ControlTools {
         this.deps.config.setSafeMode(true);
         this.deps.applyActiveConfig();
         return { ok: true, result: "entered safe mode" };
+      }
+      case "exit_safe_mode": {
+        if (!this.deps.config.inSafeMode) return { ok: true, result: "not in safe mode" };
+        // Drop the overlay: the persisted config — INCLUDING set_* saves made
+        // during safe mode — becomes active. Never an entry-time snapshot.
+        this.deps.config.setSafeMode(false);
+        this.deps.applyActiveConfig();
+        this.deps.resetCrashCounter("exit_safe_mode");
+        return { ok: true, result: "left safe mode — your saved settings are active again" };
+      }
+      case "repair_resurrection": {
+        const status = await this.deps.repairResurrection();
+        if (status.armed) return { ok: true, result: status.detail };
+        // Privilege genuinely blocks it: honest unsupported, manual step rides
+        // in result (platform_note / the tool's pinned description).
+        return { ok: false, error: "unsupported", result: status.detail };
+      }
+      case "restart_engine": {
+        // No local child engine exists in the desktop client (the engine is
+        // Grant's process / the cloud), so the DEGRADED path is the real one:
+        // a deep reconnect — drop session state, new voice-session.
+        const ok = await this.deps.deepReconnectEngine(this.deps.reconnectTimeoutMs ?? 10_000);
+        return ok
+          ? { ok: true, result: "engine is remote — performed deep reconnect" }
+          : { ok: false, error: "timeout" };
+      }
+      case "clear_cache": {
+        await this.deps.clearCaches();
+        void this.deps.reconnectEngine(this.deps.reconnectTimeoutMs ?? 10_000);
+        return { ok: true, result: "cache cleared — reconnecting (settings and history kept)" };
+      }
+      case "restart_app": {
+        // response_ordering: reply {ok:true,'restarting'}, FLUSH, act >=250 ms
+        // later — never in-handler. The exit removes the heartbeat so the OS
+        // service relaunches immediately (the ONE relaunch path).
+        setTimeout(() => this.deps.restartApp(), 350);
+        return { ok: true, result: "restarting" };
+      }
+      case "reset_to_defaults": {
+        // The big red button: FACTORY (the immutable constant), settings-only.
+        // SURVIVES: token, engine allow-list, resurrection registration (we
+        // simply never touch them). Invalidates LKG; clears the safe-mode
+        // flag; autonomy lands on the fresh-install cap via factory.
+        this.deps.config.reset();
+        this.deps.lkg.invalidateAll();
+        this.deps.resetCrashCounter("reset_to_defaults");
+        setTimeout(() => this.deps.restartApp(), 350); // response_ordering
+        return { ok: true, result: "restarting" };
       }
       default:
         return { ok: false, error: "unsupported" };
@@ -324,7 +455,14 @@ export class ControlTools {
         continue;
       }
       if (t === "restart_engine") {
-        tools[t] = this.deps.engineIsLocal?.() ? true : "degraded";
+        // The desktop client never owns a child engine process, so the true
+        // path is the pinned DEGRADED one (deep reconnect) everywhere.
+        tools[t] = "degraded";
+        continue;
+      }
+      if (t === "restart_app") {
+        // Without an armed resurrection service the exit would strand her.
+        tools[t] = this.deps.resurrectionArmed();
         continue;
       }
       tools[t] = true;
