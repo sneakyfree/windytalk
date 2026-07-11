@@ -1,0 +1,369 @@
+{
+  "$comment": "control.mcp.v1 — FROZEN 2026-07-11 (rev.6), after FIVE adversarial verify rounds (each = a builder-lens + a security/promise-lens reviewer). Findings per round: 16, 9, 2, 1, 1 — a clean convergence. Round 5's two reviewers INDEPENDENTLY converged on a single finding (the tier-2 SIGKILL needed the same pid-identity verify rev.5 gave the takeover kill — pinned in resurrection.heartbeat.staleness_tiers.identity_aware) and both explicitly recommended freezing rev.6 after that determinate pin without a sixth full round; every other rev.5 mechanism survived direct attack in both round-5 reviews. Frozen accordingly. Frozen != infallible: additive -> v1.1 via PR; breaking -> v2 + tell Grant (contracts/README.md). The SELF-HEAL surface: the knobs an agent may touch to keep Windy Talk running so a non-technical user ('grandma') is never stranded. Formalizes the 'knobs' half of ADR-058 D4 under D5 trust tiers. SEPARATE from hands.mcp.v1 (drives OTHER apps) — this is Windy Talk's OWN health. Hosted by the supervisor (Electron main), not the voice engine: the doctor is not in the patient; the supervisor is kept alive by an OS resurrection service. Change control: additive -> v1.1 via PR; breaking -> v2 + tell Grant (contracts/README.md).",
+  "contract": "control.mcp.v1",
+  "mcp_protocol": "2025-06-18",
+  "$mcp_protocol_note": "Served over BOTH JSON-RPC MCP and plain local HTTP (GET /tools, POST /invoke), same dual transport as hands.mcp.v1. MCP compliance is NORMATIVE and goes beyond hands' handler: the server MUST answer `initialize` (echoing protocolVersion '2025-06-18') and `notifications/initialized`; structured diagnostic results are serialized as canonical JSON in the text content AND as `structuredContent`. NOTE for the builder: hands/surface.py handle_mcp is the starting point but (a) implements no initialize lifecycle and (b) renders results via Python str() which is NOT valid JSON (single quotes) — both must be fixed here; the str() issue is also a latent bug in hands worth flagging to Grant.",
+
+  "security": {
+    "$comment": "The gate is the SAME proven wall as hands/surface.py — per-install bearer token (constant-time compare), loopback-only bind, reject any request carrying an Origin header, no CORS — BUT hardened for a control port, which can reset/reconfigure/update the app.",
+    "port": 8782,
+    "$port_note": "FIXED at 8782 (not 'proposed'). If the bind fails, check the instance lock: if THIS process holds instance.lock but can't bind, a foreign same-user process is squatting :8782 — surface it (the squatter is NOT the legit instance) rather than assume-live; if this process does NOT hold the lock, another Windy Talk instance is live (defer to single_instance). Never silently bind a different port. The bound port is written to the port file for client discovery. (A local same-user squatter is a conceded local-trust DoS, not an escalation — it can already read the 0600 token file.)",
+    "token": {
+      "lifecycle": "PER-INSTALL, distinct from the hands token (do NOT reuse WINDYTALK_HANDS_TOKEN — scope violation). Generated on first run, persisted, SURVIVES restart_app and reset_to_defaults, rotated only by an explicit UI action (which re-onboards connected agents — never silently orphans them). This is a deliberate departure from hands/surface.py's per-LAUNCH token: a rotating token would strand a registered MCP client (the grandma path) on every restart.",
+      "storage": "~/.windytalk/control-token (0600) on macOS/Linux; %APPDATA%\\WindyTalk\\control-token (owner-only ACL) on Windows.",
+      "header": "X-Windytalk-Control-Token",
+      "env_override": "WINDYTALK_CONTROL_TOKEN (tests only)",
+      "port_file": "~/.windytalk/control-port (and Windows %APPDATA% equivalent) — the bound port, for local-client discovery."
+    },
+    "always_confirm_floor": {
+      "$comment": "hands/tiers.py lets ANY ask_first tool be session-upgraded to always-allow, and autonomy 7-10 auto-allows ask_first tools — either would let a fat-fingered grant or a raised autonomy silently bypass the gate on tools that LOOSEN SAFETY, REDIRECT DATA FLOW, or STRAND the user. The floor is the set of (tool, condition) pairs that ALWAYS confirm per-invocation: never session-upgradeable AND never dissolved by autonomy level. Round-2 fix: the earlier 'non_session_upgradeable' set protected data-flow tools but NOT the value/direction safety tools (mute-to-0, exit_safe_mode, enabling always-listen), so those guards evaporated at autonomy>=7. This closes it.",
+      "always": ["set_engine_url", "set_brain", "reset_to_defaults", "apply_update", "exit_safe_mode"],
+      "conditional": {
+        "set_autonomy": "when level > current_autonomy (RAISING only — lowering is the safe direction and resolves via tier_override.lower_or_equal to auto_allow; putting set_autonomy in 'always' would wrongly force-confirm lowering and dead-code that branch)",
+        "set_volume": "when level == 0 (muting is a stranding vector)",
+        "set_wake_mode": "when hands_free == true (enabling always-listen is a privacy escalation)"
+      }
+    },
+    "engine_allow_list": {
+      "$comment": "set_engine_url is host-pinned. The brain pin in agents/connect.py (https + *.windymind.ai) CANNOT be reused verbatim because the engine is legitimately loopback or the user's LAN 5090 box. Concrete allow-list:",
+      "allowed": ["loopback (127.0.0.1, ::1, localhost) — ws:// permitted", "*.thewindstorm.uk cloud engine — wss:// REQUIRED", "hosts recorded during an explicit in-UI engine-pairing flow — wss:// REQUIRED for non-loopback"],
+      "immutable_via_mcp": "The allow-list is NOT mutable by any MCP tool (else an agent reopens the hole). New hosts are added only through the UI pairing flow.",
+      "host_match": "Match on urlparse(url).hostname (NOT a substring of the raw URL — a from-scratch builder must not reintroduce naive substring matching that 'evil.com/windymind.ai' or 'user@evil' would defeat); suffix-match cloud hosts with a LEADING DOT ('.thewindstorm.uk'); this reuses the exact discipline in agents/connect.py._require_trusted_url.",
+      "reject_error": "untrusted host: <host>  (NEVER 'denied' — that is reserved for tier refusal)"
+    },
+    "confirmer_fallback": "DECIDED 2026-07-11: ask_first/always_confirm are delivered via voice or an in-app UI tap; when the renderer is unavailable (the deep-failure case), the SUPERVISOR draws a minimal NATIVE OS confirm dialog itself — chosen over plain fail-closed so the most recovery stays reachable when everything's on fire (the 'her agent can still fix it' promise holds deeper). It looks like a bare OS popup, not the branded app — an accepted trade for deep-failure reach. Only when even a native dialog cannot render (a truly headless/hung host) do gated tools fail CLOSED (deny); the physical Reset button (in-process, its dialog IS the confirmation) remains the agent-free path for reset_to_defaults at the very bottom."
+  },
+
+  "tiers": {
+    "$comment": "Three tiers as in hands.mcp.v1 (ADR-010 S9). The per-tool `tier` field is NORMATIVE and authoritative; the SAFE-BY-DEFAULT idea is design rationale, not a runtime rule (do not auto-allow a tool the table marks ask_first). auto_allow: execute immediately. ask_first: one plain confirmation (voice or tap, never a terminal). always_confirm: per-invocation confirmation, never a session upgrade. A denial returns ok:false error:'denied' — never silence. CRITICAL: the session-scoped always-allow is granted by the USER via the confirmer (per hands/tiers.py), NEVER self-granted by an agent — the agent can never self-escalate. Tools in security.always_confirm_floor never take a standing grant. See tier_resolution for the single authoritative algorithm.",
+    "values": ["auto_allow", "ask_first", "always_confirm"],
+    "tier_resolution": {
+      "$comment": "The SINGLE normative algorithm the surface uses to compute a tool's EFFECTIVE tier for a given call. Apply the steps in order; this is authoritative over any per-tool prose. It is a documented extension of hands/tiers.py (which resolves static tier only).",
+      "step1_base": "Start from the tool's static `tier` — UNLESS the tool defines a value-conditional resolver that FULLY REPLACES it: set_autonomy uses its `tier_override` (level <= current_autonomy -> auto_allow, else always_confirm); set_volume uses level==0 -> always_confirm, else auto_allow.",
+      "step2_floor": "If the (tool, condition) is in security.always_confirm_floor, the effective tier is always_confirm and steps 3-4 do NOT apply (confirm every invocation; no session grant; no autonomy auto-allow).",
+      "step3_autonomy": "Otherwise, if the effective tier is ask_first and current autonomy >= 7, treat it as a standing user grant (auto-allow) for this session.",
+      "step4_session_grant": "Otherwise an ask_first tool MAY be user-upgraded to a session grant via the confirmer — granted by the USER, never self-granted by an agent."
+    },
+    "autonomy_mapping": {
+      "$comment": "set_autonomy (0-10) affects only step 3 of tier_resolution. always_confirm tools and the always_confirm_floor ALWAYS confirm at every level (level 10 does NOT touch them). Fresh-install cap = 3.",
+      "0-2": "even auto_allow recovery tools notify the user after acting",
+      "3-6": "tiers exactly as the table states (the default band)",
+      "7-10": "ask_first tools behave as a standing user grant EXCEPT the security.always_confirm_floor, which always confirm",
+      "fresh_install_cap": 3
+    }
+  },
+
+  "recovery_coordinator": {
+    "$comment": "ONE state machine owns all recovery so the healers (Layer 1, resident agent, external agent) can't fight into a thrash loop. Numbers are NORMATIVE so the acceptance tests are writable.",
+    "lock": {
+      "holders": ["reconnect", "enter_safe_mode", "exit_safe_mode", "restart_engine", "restart_app", "clear_cache", "reset_to_defaults", "apply_update"],
+      "preempt": "enter_safe_mode MAY preempt a held lock — it is the escape hatch for a stuck state; a hung reconnect must never block the one tool designed for hung states. PREEMPT = forcibly RECLAIM the lock: the preempted handler is abandoned and its result discarded (never two recovery ops running concurrently — that is the thrash the lock exists to stop).",
+      "config_tools": "set_* config tools do NOT take the lock, but return ok:false error:'already_recovering' if the lock is held (a recovery would overwrite their change anyway).",
+      "holder_when_held": "A LOCK-HOLDER tool invoked while the lock is held fails fast with ok:false error:'already_recovering' (never queues, never runs concurrently) — the sole exception is enter_safe_mode, which preempts (reclaims the lock, abandons the held handler).",
+      "check_order": "The coordinator's gate (lock check, then debounce, then rate-limit) runs BEFORE the tier confirmer — so a call that is lock-blocked or rate-limited returns already_recovering/rate_limited immediately and NEVER pointlessly prompts the user. Only a call that passes the coordinator reaches the confirmer.",
+      "release": "on handler completion OR a hard 30 s ceiling, whichever is first (no permanent deadlock). EXCEPTION: apply_update holds the lock through its staging + verification window (up to 90 s, matching self_update.rollback_criteria's 60 s + margin) so a concurrent restart_app/set_* cannot fire mid-stage.",
+      "layer1_exemption": "ALL of Layer 1's own autonomic actions — its reconnect AND its crash-loop safe-mode trip — go through the LOCK but are NEVER charged the surface rate-limit or debounce (they are internal to the supervisor, not surface calls). This matters specifically for the crash-loop trip: enter_safe_mode is auto_allow and surface-rate-limited (an agent could burn its 5/300s budget), so the Layer-1 trip MUST be exempt or the escape hatch could return rate_limited mid-thrash — the exact failure it exists to stop. Layer 1's reconnect also uses an unbounded slow-retry backoff and never permanently gives up."
+    },
+    "rate_limit": {
+      "debounce": "5 s minimum between EXECUTED calls with the same key; a call inside the window returns ok:false error:'rate_limited'. Like the ceiling, debounce is measured on executed calls — a rejected call does not start a new debounce window.",
+      "key": "tool name + canonicalized args (so set_audio_input(A) then set_audio_input(B) is NOT debounced — the legit 'try the other mic' flow)",
+      "ceiling": "5 EXECUTED calls per tool per 300 s rolling window; past it, ok:false error:'rate_limited' with a plain reason",
+      "counters": "global per tool (all surface callers share one budget); rejected calls (already_recovering / rate_limited / denied) do NOT increment the executed counter",
+      "over_ceiling": "returns rate_limited — but Layer 1 (see layer1_exemption) keeps retrying, so the user is never permanently abandoned"
+    },
+    "exempt": {
+      "$comment": "The exempt set is enumerated BY NAME (not 'get_*', which would wrongly exclude list_audio_devices/check_for_update). These are exempt from the lock AND the rate limit.",
+      "tools": ["get_health", "get_status", "get_config", "get_logs", "list_audio_devices", "get_capabilities", "check_for_update"],
+      "run_selftest": "exempt from the LOCK but IS debounced/rate-limited (it hits the engine/brain and plays audio).",
+      "repair_resurrection": "NOT blocked by a held lock (it touches only the OS service registration, never the engine/session, and its repair routine is already serialized + idempotent) — but IS debounced/rate-limited."
+    }
+  },
+
+  "crash_loop": {
+    "$comment": "Layer 1's detector, pinned so get_health.restarts/crash_loop and the chaos harness are gradeable.",
+    "trip": ">=3 engine/app restarts within 120 s -> enter safe mode",
+    "reset": "counter resets after 300 s of continuous healthy uptime, or on reset_to_defaults / exit_safe_mode",
+    "restarts_field": "get_health.restarts = restarts since supervisor start",
+    "crash_loop_field": "get_health.crash_loop clears when the counter resets"
+  },
+
+  "resurrection": {
+    "$comment": "The supervisor's supervisor (design Gap 1). ARCHITECTURE = heartbeat-watcher-spawner on ALL THREE OSes (NOT child-supervision like systemd Restart=always, which only restarts its own child and misses dock/user launches). One tiny service per OS whose only job is 'is Windy Talk serving? if not, relaunch'.",
+    "heartbeat": {
+      "path": "~/.windytalk/heartbeat (macOS/Linux); %LOCALAPPDATA%\\WindyTalk\\heartbeat (Windows)",
+      "cadence": "supervisor touches every 5 s; service checks every 15 s; relaunch <= 45 s after a SIGKILL.",
+      "staleness_tiers": {
+        "$comment": "TWO tiers, because a naive 'stale = mtime>30s -> kill' would kill-loop a disk-full-but-serving app and SIGKILL a supervisor mid-native-confirm-dialog, while a pid-only rule (rev.3) never recovered a WEDGED supervisor (pid present, heartbeat stopped). Round-3 fix — both are covered:",
+        "identity_aware": "'pid absent/present' is IDENTITY-AWARE everywhere in these tiers (round-5 fix): a live pid whose executable path + start_time do NOT match the heartbeat's {pid, started_at} is treated as ABSENT — the real app is gone and the OS reused the pid. The service MUST verify identity (exe path + start_time vs the heartbeat record) before ANY SIGKILL — the SAME discipline as single_instance's takeover kill; started_at is the identity for BOTH killers. This both prevents killing an innocent pid-reuse victim and keeps tier1 firing at the ≤45 s budget instead of blocking until 90 s on a recycled pid.",
+        "tier1_dead": "heartbeat file ABSENT, OR (mtime > 30 s AND pid absent-by-identity) -> the process is gone -> relaunch immediately (this is also the restart_app fast path: it removes the heartbeat).",
+        "tier2_wedged": "pid PRESENT-by-identity (see identity_aware — a mismatched recycled pid is tier1-dead, not this) but mtime > 90 s -> the supervisor may be wedged. Two probes: (a) fs-writability probe of the heartbeat dir — if writable=FALSE the disk is full (the app is alive but can't write): do NOT SIGKILL (relaunch wouldn't fix disk-full), and surface disk-full via an OS-LEVEL notification from the service itself, NOT the in-app UI (which may be down); (b) if writable=TRUE, a heartbeat stale past 90 s already MEANS the serving loop stopped (the writer is fate-coupled to serving per liveness_semantics), so this is a genuine wedge -> SIGKILL the pid THEN relaunch, under service_backoff. CRITICAL (round-4 fix): a bare TCP/HTTP accept on :8782 MUST NOT veto this kill. The :8782 listener in the reference (hands/surface.py) runs on a SEPARATE daemon thread that keeps accepting connections even when main's serving loop is deadlocked — so 'the port answered' does NOT prove the app serves. Any :8782 probe used as a liveness signal MUST be a SERVING-ATTESTING round-trip (the same renderer<->main / serving-path echo that gates the heartbeat, e.g. a get_health served by the live loop), never a bare accept; and even then, writable+stale-past-90s is a wedge and is killed.",
+        "exemptions": "The heartbeat writer is fate-coupled to the serving loop (it is bumped BY that loop, or by a successfully-served :8782 serving-path round-trip — a third attestation source that covers the renderer-down native-confirm case). Long operations do NOT stall it: update staging runs OFF the serving loop (an in-app worker thread/process — see self_update; the external WATCHDOG only verifies + rolls back, it does not stage), and native confirm dialogs are drawn without blocking the serving loop. So a correct supervisor keeps bumping during mode='updating' and during a modal; only a genuine serving deadlock stops it — which tier2 then kills (a bare port-accept cannot save it)."
+      },
+      "liveness_semantics": "The heartbeat attests the SUPERVISOR's SERVING loop, not a free-running timer: bumped only after a renderer<->main round-trip (or recent engine-frame) proves the app is actually serving. A hung renderer with a ticking timer must NOT read as alive (the 'looks-alive-but-dead' failure) — a correct heartbeat STOPS when serving stops, so the file goes stale and tier1/tier2 relaunches. Renderer hangs are ALSO caught by Layer 1's watchdog."
+    },
+    "single_instance": "The app holds a single-instance lock (~/.windytalk/instance.lock via flock; Windows named mutex). A second instance asks the holder to ack via a SERVING-ATTESTING :8782 round-trip (the same echo as the staleness probe, not a bare accept); if the holder acks within 3 s (one retry), the second focuses it and exits. If it does NOT ack, the holder is wedged: the second instance re-reads the lock-file content — written as {pid, started_at, exe} at flock-acquire — and VERIFIES the live pid's start_time + exe against those recorded values. On MATCH: SIGKILL the holder, take the flock, start serving. On MISMATCH: the recorded holder is already gone (flock releases on death, so a mismatched pid cannot be the true holder) — do NOT kill; surface it as the foreign-holder/squatter case (per $port_note) and exit. (exe is recorded at acquire, so an A/B pointer flip is handled: the new launcher records its own exe.) Ack timeout (3 s) is set comfortably above worst-case healthy latency so a GC-paused-but-live holder is NOT spuriously killed by a double-click. This closes the 'wedged pid holds the lock so the dock icon can't recover it' trap (round-3 fix). Coordination among the three actors (wedged pid, dock-launch takeover, OS resurrection service): flock is atomic and only a non-holder ever kills, so exactly one relaunch wins — no mutual-kill race. This + one relaunch path also prevents a restart_app / resurrection double-launch race.",
+    "restart_app_path": "restart_app exits with a distinguished code and REMOVES the heartbeat file so the service relaunches immediately — ONE relaunch path, no race.",
+    "service_backoff": "the OS service has its OWN restart ceiling: max 3 relaunches per 300 s, then drop to 1 attempt per 5 min; the counter resets after 300 s of continuous fresh heartbeat. (Load-bearing: an app that dies before writing its first heartbeat on every launch — crash-at-boot — must not relaunch every 15 s forever. NORMATIVE numbers so the 'does not thrash-relaunch' chaos assertion is gradeable.)",
+    "heartbeat_content": "The heartbeat file is JSON {pid, started_at, exe} (mtime carries staleness). The OS service reads the pid from this file ONLY — process-NAME scanning to find/kill the app is FORBIDDEN (wrong-kill risk). {started_at, exe} is the identity BOTH kill paths (tier2 and the single_instance takeover) verify against before any SIGKILL, per staleness_tiers.identity_aware.",
+    "self_check": "On launch the app verifies its resurrection service is installed AND armed, exposes it as get_health.resurrection_armed (bool), and if unarmed AUTO-REPAIRS it in place (re-install/re-arm the user-level LaunchAgent / systemd --user unit + `loginctl enable-linger` / Scheduled Task) — falling back to a plain UI warning ONLY if privilege genuinely blocks it. The floor cannot be merely observed-broken; it must self-repair (round-2 fix — otherwise it is an unrepairable single point of failure). systemd --user GOTCHA: dies at logout unless lingering is enabled — the installer and the self-check both handle it. The agent-callable repair_resurrection tool is the on-demand version of this same repair."
+  },
+
+  "self_update": {
+    "$comment": "apply_update is RCE-by-design; these guards are NORMATIVE and must be in place before apply_update is built/frozen (design Gap 6, hardened after round-1 review).",
+    "signature": "The update artifact MUST be signature-verified against a public key PINNED in the shipped app BEFORE it is staged. run_selftest is NOT an integrity gate (it checks reachability, which a malicious build passes trivially). No signature => refuse, error:'unsigned or untrusted update'.",
+    "anti_rollback": "Signature proves AUTHENTICITY, not FRESHNESS — an old release stays validly signed forever. To block downgrade-to-signed-vulnerable (round-2 fix): apply_update MUST reject any target whose version is not the CURRENT CHANNEL-HEAD — i.e. reject version <= current AND reject any signed intermediate that is > current but < head (both return error:'downgrade refused'). Only the channel-head installs. A signed minimum-version / revocation counter (when the source provides one) is honored. 'version' comparison is by the shipped semver rule (strict). check_for_update.latest IS the head, so the legit flow never trips this.",
+    "out_of_process_rollback": "The rollback trigger lives OUTSIDE the app (in the OS resurrection service / a tiny separate watchdog), so a hostile new build cannot suppress its own rollback. A/B on-disk: keep the previous known-good BINARY; on apply_update install alongside, flip a pointer, relaunch; the external watcher verifies and flips back on failure. IMMUTABILITY (round-2 fix): apply_update A/B-swaps ONLY the app binary — it MUST NOT modify the OS resurrection service, the rollback watchdog, or their configs (else a hostile build ships a neutered watchdog and the rollback guarantee is illusory). The resurrection service + watchdog are updated only by a separate installer action with its own independent signature verification, never through apply_update.",
+    "rollback_criteria": "The new build must, within 60 s: launch, write a fresh heartbeat, bind :8782, and pass run_selftest's ENGINE reachability stage. Audio-device stages are reported but are NOT rollback triggers (grandma may update with her headset unplugged — a healthy update must not roll back forever).",
+    "disk": "apply_update prechecks free space for the A/B pair and fails CLOSED (error:'insufficient disk') rather than half-staging.",
+    "source": "DECIDED 2026-07-11: the update CHANNEL is GitHub Releases of the Windy Talk repo (channel-head = the newest non-prerelease Release; it keeps old artifacts, which anti_rollback already refuses); the SIGNING KEY is a dedicated, self-generated keypair whose PRIVATE half Grant holds (never in the repo, never on a build box unattended) and whose PUBLIC half is embedded in the shipped app for verify-before-stage. This is a real cryptographic trust root — whoever holds the private key can push code to every install. REMAINING real-world action (Grant, before slice 5 ships): generate the keypair, embed the public key, and wire the signing step into release publishing. Until the public key is embedded, the tools stay forced-honest and INERT: check_for_update returns ok:true result:{update_available:false, reason:'no update source configured'}, apply_update returns error:'no update source configured'. So the feature is safe-off by construction until the trust root exists."
+  },
+
+  "safe_mode": {
+    "$comment": "enter_safe_mode/exit_safe_mode semantics (design Gap: safe mode was a one-way door in rev.1).",
+    "nature": "A runtime OVERLAY over the UNTOUCHED persisted config: FACTORY defaults for the behavioral values — push-to-talk, hands off, factory-default brain, and the OS/system-default audio devices (safe mode uses FACTORY defaults, NOT last-known-good; LKG is Layer-1 auto-recovery only. Safe mode eliminates variables, and system-default audio usually IS the working device). EXCEPTION (round-3 fix): the engine_url is NOT reset to factory — it KEEPS the current/paired engine. On the flagship local-5090-over-LAN topology the factory engine URL reaches no engine by construction, so a factory reset there would make safe mode VOICELESS (and the resident agent down with it); the engine is rarely the crash variable, so safe mode preserves it. The mode is persisted as a flag so a crash-looping machine relaunches INTO safe mode, not the loop config.",
+    "config_writes_in_safe_mode": "set_* while in safe mode writes the underlying config and returns result:'saved — will apply when you leave safe mode'. get_config reports BOTH active (overlay) and saved (underlying) values.",
+    "reset_clears_flag": "reset_to_defaults CLEARS the persisted safe-mode flag — a reset lands in mode:'normal' (a clean factory start, not stuck in safe mode).",
+    "exit": "exit_safe_mode DROPS the overlay; the persisted config — INCLUDING any set_* saves made during safe mode — becomes active (this is why the exit tool exists — nothing else re-enables hands as a unit). NOTE: it does NOT restore a frozen entry-time snapshot; that would silently discard the fixes the agent saved during safe mode (which config_writes_in_safe_mode promised would 'apply when you leave')."
+  },
+
+  "last_known_good": {
+    "$comment": "LKG is the user's most recent WORKING customization, used ONLY by Layer-1 autonomic auto-recovery (which tries to keep her working setup). Safe mode does NOT use LKG (it uses factory defaults — see safe_mode.nature); reset_to_defaults does NOT use LKG (factory). LKG must not be able to rot into the thing that strands her:",
+    "writes": "atomic (temp + rename), checksummed, keep N generations",
+    "corrupt_fallback": "if every LKG generation is corrupt, fall back to the read-only baked-in FACTORY defaults (an immutable compiled-in constant, never a file that can rot) — 'lands somewhere that works' is guaranteed by that constant.",
+    "reset_invalidates_lkg": "reset_to_defaults INVALIDATES all LKG generations (factory becomes the new seed), so Layer-1 auto-recovery cannot later restore the customization the user explicitly discarded with the big red button."
+  },
+
+  "diagnostics_privacy": {
+    "$comment": "HARD RULE on every read tool — outputs may be read by an EXTERNAL third-party brain and LEAVE the machine, so scrub REGARDLESS of destination. Implement as a POSITIVE ALLOW-LIST of typed, pre-scrubbed fields (not a blocklist over free-form internal state, which misses novel shapes like a URL with a token query param).",
+    "never": "conversation transcript / user text; any secret/token/passport/api-key (redact to '***'); full home paths (basename or a role like '<config-dir>'); IP/MAC/SSID; precise geolocation; URL query strings (strip them)",
+    "deliberate_exceptions": {
+      "$comment": "Three fields the repair flow REQUIRES, allowed on purpose (they are the user's OWN labels/ids that her OWN agent needs to fix things; a user connecting an external agent implicitly accepts her agent seeing them):",
+      "engine_url": "scheme + host + port returned verbatim IF the host is on security.engine_allow_list, else '<untrusted-host>' (the agent needs it to diagnose 'the home machine is down')",
+      "audio_device_names": "returned scrubbed of personal names. set_audio_input consumes the ID, not the name, so the name is only a human hint — strip name-bearing tokens in BOTH positions and locales: leading English genitive (\"Grant's AirPods\"->\"AirPods\"), trailing localized possessive (\"iPhone de Marie\", \"AirPods von Grant\", \"iPhone di Maria\" -> device type only), and hostname-derived prefixes (\"GRANT-PC Bluetooth\"). When the label is NOT confidently a known device-type string (i.e. it contains any token that could be a personal name and isn't a recognized device word — covering marker-less names like 'Grant Speaker' and locales whose possessives aren't enumerated), DEFAULT to returning the device TYPE + id, keeping the raw label local-UI-only. Accept some over-scrub to make the guarantee real. Goal (best-effort but default-safe): no first/last name reaches a third-party cloud brain.",
+      "brain_model_id": "returned verbatim (non-secret)"
+    }
+  },
+
+  "platform_note": "ONE cross-OS vocabulary — the agent never needs to know the OS. get_capabilities reports what THIS box supports as a TRI-STATE per tool: true | false | 'degraded'. Capability-gated: restart_engine ('degraded' on a remote engine — see that tool), clear_cache (paths differ per OS), restart_app (desktop vs mobile), repair_resurrection (get_capabilities reports FALSE where privilege blocks re-arming the service — 'unsupported' is only the invoke-time error code, not a capability value). A tool that cannot run returns ok:false error:'unsupported' (with the reason in `result`, per result_shape); a degraded tool runs its degraded behavior and says so. Everything else is identical on macOS (Apple Silicon + Intel), Windows, and Linux.",
+
+  "consumers": {
+    "resident_agent": "Windy Talk's OWN brain — primary. REACH: the 24 control tools are advertised through voice-session.v1 alongside the hands tools when the session is up (the brain calls them via tool_call); AND the client holds the control token for direct HTTP to :8782 as the engine-DOWN path (so the surface is reachable exactly when the engine dies).",
+    "autonomic_supervisor": "Layer 1 (not an agent) — handles brain-unreachable / socket-drop / crash-loop with dumb reliable code. This is what makes 'never crash-loops' true when the brain is the thing that died.",
+    "local_agent": "A LOCAL MCP client (Claude Desktop, local Claude Code). v1 POWER-USER path: it reads the token directly from the control-token file (file access = local trust, same model as hands). The 'never show the token as copyable text' rule applies to the NORMIE UI, not to the on-disk file.",
+    "external_agent": "A remote agent (her phone's ChatGPT) — the most emotionally load-bearing path but the hardest. SCOPED TO v1.1. Uses the brokered short-lived-EPT discipline from auth/eternitas.py (scoped, <=5-min, per-tool-class) over an end-to-end/zero-knowledge relay — NOT the static loopback bearer over a relay the relay could log. v1 must be HONEST that it delivers self-heal + resident-agent + local-agent, not yet external-agent rescue.",
+    "the_reset_button": "A physical UI button that always works, in-process (no HTTP, no bearer token): its confirm dialog IS the always_confirm, and it calls reset_to_defaults. The final agent-free fallback."
+  },
+
+  "onboarding_note": "The external-agent path (v1.1) needs one-tap onboarding WITHOUT the user editing config or copying a token: (a) one-click MCP-server registration into a supported local client with the token injected for her, or (b) route through the windy-fix-me end-to-end relay so she pastes nothing. The token is never shown as copyable text in the normie UI. Until this ships, the UI/marketing must NOT promise 'your ChatGPT fixes it'.",
+
+  "response_ordering": "Tools that tear down a transport MUST send {ok:true, result:'restarting'}, FLUSH the socket, THEN act >= 250 ms later — never in-handler (a dropped connection is the 'silence' the contract forbids). Two cases: (1) SUPERVISOR-terminating tools (restart_app, reset_to_defaults, apply_update) end the process hosting :8782, so the :8782 response itself is at risk — the flush-then-delay is mandatory there. (2) restart_engine only drops the VOICE-SESSION transport (the brain's tool_call path) mid-reply; it does NOT terminate the supervisor, so :8782 is never at risk — apply the flush-then-delay on the voice-session path only, and do NOT add a supervisor-exit delay. Clients confirm success by polling get_status/get_health after the port returns.",
+
+  "tools": [
+    {
+      "name": "get_health",
+      "tier": "auto_allow",
+      "description": "The FIRST tool to call when the user says anything is wrong. Full health snapshot + a plain-English 'summary' to read aloud + a 'suggested_fix' (ALWAYS the least-destructive plausible tool, and one get_capabilities reports usable here, else null). Works when engine and brain are down. Subject to diagnostics_privacy.",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "healthy": { "type": "boolean", "description": "Derived: engine.connected && brain.reachable && mic.present && !crash_loop && mode=='normal'." },
+          "mode": { "type": "string", "enum": ["normal", "safe", "recovering", "updating"] },
+          "engine": { "type": "object", "properties": { "connected": { "type": "boolean" }, "url": { "type": "string", "description": "scrubbed per diagnostics_privacy" }, "last_frame_s_ago": { "type": ["number", "null"], "description": "seconds since last engine audio frame; null if never" } } },
+          "brain": { "type": "object", "properties": { "reachable": { "type": "boolean" }, "model": { "type": ["string", "null"] } } },
+          "mic": { "type": "object", "properties": { "present": { "type": "boolean" }, "device": { "type": ["string", "null"] }, "capturing": { "type": "boolean" } } },
+          "speaker": { "type": "object", "properties": { "device": { "type": ["string", "null"] } } },
+          "uptime_s": { "type": "number", "description": "supervisor process uptime" },
+          "restarts": { "type": "integer" },
+          "crash_loop": { "type": "boolean" },
+          "resurrection_armed": { "type": "boolean" },
+          "last_error": { "type": ["string", "null"], "description": "short technical string, scrubbed; never a payload" },
+          "version": { "type": "string" },
+          "summary": { "type": "string" },
+          "suggested_fix": { "type": ["string", "null"] }
+        },
+        "required": ["healthy", "mode", "engine", "brain", "mic", "restarts", "crash_loop", "resurrection_armed", "summary", "suggested_fix"]
+      }
+    },
+    {
+      "name": "get_status",
+      "tier": "auto_allow",
+      "description": "Lightweight 'what is it doing right now'. Voice-state and health-mode are INDEPENDENT axes (a session can be 'listening' while mode is 'recovering').",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "returns": { "type": "object", "properties": { "state": { "type": "string", "enum": ["idle", "listening", "thinking", "speaking", "paused", "offline"] }, "mic_on": { "type": "boolean" }, "session_id": { "type": ["string", "null"] } }, "required": ["state", "mic_on"] }
+    },
+    {
+      "name": "get_config",
+      "tier": "auto_allow",
+      "description": "Current user-changeable settings, active vs saved (they differ in safe mode). Secrets redacted; subject to diagnostics_privacy (device names + on-allow-list engine URL + brain id are the deliberate exceptions).",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "returns": { "type": "object", "properties": { "active": { "$ref": "#/$defs/config" }, "saved": { "$ref": "#/$defs/config" } }, "required": ["active", "saved"] }
+    },
+    {
+      "name": "get_logs",
+      "tier": "auto_allow",
+      "description": "Recent technical event log (connections, restarts, errors). Content-free + scrubbed. Newest LAST.",
+      "inputSchema": { "type": "object", "properties": { "lines": { "type": "integer", "minimum": 1, "maximum": 500, "default": 100 } }, "additionalProperties": false },
+      "returns": { "type": "object", "properties": { "lines": { "type": "array", "items": { "type": "object", "properties": { "ts": { "type": "string", "description": "ISO 8601" }, "level": { "type": "string", "enum": ["info", "warn", "error"] }, "msg": { "type": "string", "description": "scrubbed" } } } }, "truncated": { "type": "boolean" } }, "required": ["lines"] }
+    },
+    {
+      "name": "list_audio_devices",
+      "tier": "auto_allow",
+      "description": "Available mics + speakers, marking which are selected. THE fix for 'it can't hear me' / 'I can't hear it'. Device ids are stable OS-level identifiers usable in set_audio_input/set_audio_output.",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "returns": { "type": "object", "properties": { "inputs": { "type": "array", "items": { "type": "object", "properties": { "id": { "type": "string" }, "name": { "type": "string" }, "selected": { "type": "boolean" } } } }, "outputs": { "type": "array", "items": { "type": "object", "properties": { "id": { "type": "string" }, "name": { "type": "string" }, "selected": { "type": "boolean" } } } } }, "required": ["inputs", "outputs"] }
+    },
+    {
+      "name": "run_selftest",
+      "tier": "auto_allow",
+      "description": "Actively probe the chain: reach the engine, reach the brain, capture from the mic, play a short test tone. Per-stage timeout 5 s; whole tool bounded at 20 s; a timed-out stage reports pass:false detail:'timeout'. Exempt from the recovery lock but rate-limited (hits engine/brain + plays audio).",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "returns": { "type": "object", "properties": { "stages": { "type": "object", "properties": { "engine": { "type": "object", "properties": { "pass": { "type": "boolean" }, "detail": { "type": "string" } } }, "brain": { "type": "object", "properties": { "pass": { "type": "boolean" }, "detail": { "type": "string" } } }, "mic": { "type": "object", "properties": { "pass": { "type": "boolean" }, "detail": { "type": "string" } } }, "speaker": { "type": "object", "properties": { "pass": { "type": "boolean" }, "detail": { "type": "string" } } } } } }, "required": ["stages"] }
+    },
+    {
+      "name": "get_capabilities",
+      "tier": "auto_allow",
+      "description": "Which control tools work on THIS box, tri-state. The agent calls this before it tries; suggested_fix never names a non-usable tool.",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "returns": { "type": "object", "properties": { "os": { "type": "string" }, "tools": { "type": "object", "additionalProperties": { "type": ["boolean", "string"], "description": "true | false | 'degraded'" } } }, "required": ["tools"] }
+    },
+    {
+      "name": "check_for_update",
+      "tier": "auto_allow",
+      "description": "Read-only: is a newer known-good build available? Installs nothing. No source configured => ok:true, update_available:false, reason:'no update source configured'.",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "returns": { "type": "object", "properties": { "update_available": { "type": "boolean" }, "current": { "type": "string" }, "latest": { "type": ["string", "null"] }, "reason": { "type": ["string", "null"] } }, "required": ["update_available", "current"] }
+    },
+
+    {
+      "name": "reconnect",
+      "tier": "auto_allow",
+      "description": "Re-dial the connection to the voice engine (same session). No data/settings lost. The #1 fix for 'it stopped responding'. Blocks up to 10 s; ok:true result:'reconnected' only on an established session, else ok:false error:'timeout'. Governed by recovery_coordinator (lock + debounce + rate-limit); Layer 1's own retry is exempt and unbounded so a real outage is never permanently abandoned.",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+    },
+    {
+      "name": "enter_safe_mode",
+      "tier": "auto_allow",
+      "description": "Drop to the minimal reliable overlay (push-to-talk, hands off, default brain/devices) over untouched config; persisted so a crash-loop relaunches into safe mode, not the loop. Safe-direction (auto_allow) but rate-limited (repeated calls are a feature-DoS). May PREEMPT the recovery lock — it's the escape hatch for a stuck state.",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+    },
+    {
+      "name": "exit_safe_mode",
+      "tier": "ask_first",
+      "description": "Leave safe mode: DROP the safe-mode overlay so the persisted config — INCLUDING any set_* saves made during safe mode — becomes active (re-enables hands/wake/brain/devices as a unit). Does NOT restore a frozen entry-time snapshot (that would discard those saves — see safe_mode.exit). In security.always_confirm_floor: it moves AWAY from the reliable floor, so it ALWAYS confirms (never dissolved by autonomy or a session grant). Recovery-lock holder; rate-limited (symmetric with enter_safe_mode).",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+    },
+    {
+      "name": "repair_resurrection",
+      "tier": "ask_first",
+      "description": "Re-install and re-arm the OS resurrection service (the 'true floor') when get_health.resurrection_armed is false. It and the launch-time auto-repair (resurrection.self_check) invoke the SAME single, serialized, idempotent repair routine (so they can't race even if repair_resurrection is called while self_check is mid-repair — both converge). On a machine where privilege blocks it, returns ok:false error:'unsupported' with the manual step in `result`. Not a lock holder (it doesn't touch the engine/session).",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+    },
+    {
+      "name": "restart_engine",
+      "tier": "ask_first",
+      "description": "Restart the voice session. On a LOCAL child engine: restart the process (obeys response_ordering). On a REMOTE engine: DEGRADED (normative) — performs a deep reconnect (drop session state, close socket, re-authenticate, new voice-session — distinct from reconnect which re-dials the SAME session) and returns ok:true result:'engine is remote — performed deep reconnect'. get_capabilities reports restart_engine 'degraded' on remote-engine boxes.",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+    },
+    {
+      "name": "restart_app",
+      "tier": "ask_first",
+      "description": "Relaunch the whole desktop client via the single resurrection path (exit with the distinguished code + remove the heartbeat; the OS service relaunches). Obeys response_ordering. Heaviest reversible recovery.",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+    },
+    {
+      "name": "clear_cache",
+      "tier": "ask_first",
+      "description": "Clear transient caches (asset cache, tmp, stale session state) and reconnect. Settings + history kept. On-device MODELS (wake-word / ASR) are EXPLICITLY EXCLUDED in v1 — never triggers a multi-GB re-download on a normie's machine. Capability-gated (paths differ per OS).",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+    },
+    {
+      "name": "set_audio_input",
+      "tier": "ask_first",
+      "description": "Select the microphone by id (from list_audio_devices). The common fix for 'it can't hear me'. Not a recovery-lock holder; blocked with already_recovering only if a recovery is in flight.",
+      "inputSchema": { "type": "object", "properties": { "device_id": { "type": "string" } }, "required": ["device_id"], "additionalProperties": false }
+    },
+    {
+      "name": "set_audio_output",
+      "tier": "ask_first",
+      "description": "Select the speaker/output by id (from list_audio_devices). The common fix for 'I can't hear it'.",
+      "inputSchema": { "type": "object", "properties": { "device_id": { "type": "string" } }, "required": ["device_id"], "additionalProperties": false }
+    },
+    {
+      "name": "set_volume",
+      "tier": "ask_first",
+      "description": "Set the assistant's OWN output gain, 0-100 (never the OS mixer). Value-conditional tier (see tier_resolution.step1): level>0 -> auto_allow; level==0 -> always_confirm (muting is a stranding vector, and level==0 is in security.always_confirm_floor, so it confirms every time even at high autonomy).",
+      "inputSchema": { "type": "object", "properties": { "level": { "type": "integer", "minimum": 0, "maximum": 100 } }, "required": ["level"], "additionalProperties": false }
+    },
+    {
+      "name": "set_engine_url",
+      "tier": "ask_first",
+      "description": "Point at a different voice engine (cloud fallback or back to local). Host-pinned to security.engine_allow_list (loopback ws://, or allow-listed wss:// hosts, matched on urlparse().hostname); a rejected host returns error:'untrusted host: <host>' (never 'denied'). In security.always_confirm_floor (redirects data flow — always confirms).",
+      "inputSchema": { "type": "object", "properties": { "url": { "type": "string" } }, "required": ["url"], "additionalProperties": false }
+    },
+    {
+      "name": "set_brain",
+      "tier": "ask_first",
+      "description": "Switch which model/brain answers (via Windy Mind). Validated against the last-synced entitlement CACHE (works offline, when it's most needed); 'default' always accepted; unentitled => error:'not entitled to brain: <id>'. In security.always_confirm_floor.",
+      "inputSchema": { "type": "object", "properties": { "brain": { "type": "string" } }, "required": ["brain"], "additionalProperties": false }
+    },
+    {
+      "name": "set_wake_mode",
+      "tier": "ask_first",
+      "description": "Turn hands-free 'Hey Windy' on or off (off = push-to-talk). ask_first; and when hands_free==true it is in security.always_confirm_floor (enabling always-listen is a privacy escalation, so it confirms every time even at high autonomy). Turning it OFF is the safe direction and follows the normal ask_first path.",
+      "inputSchema": { "type": "object", "properties": { "hands_free": { "type": "boolean" } }, "required": ["hands_free"], "additionalProperties": false }
+    },
+    {
+      "name": "set_autonomy",
+      "tier": "ask_first",
+      "description": "How much the agent may do without asking (drives tiers.autonomy_mapping). DIRECTION-AWARE via tier_override (the ONLY tool with one; tier_override fully REPLACES the static ask_first tier — see tier_resolution.step1). In security.always_confirm_floor when raising. 0 = ask about everything, 10 = maximum hands-free (never touches always_confirm tools or the floor). Fresh-install cap = 3.",
+      "tier_override": { "$comment": "Resolved by the SURFACE (not TierPolicy as-is — a documented extension of the hands pattern), reading current autonomy from the coordinator's config snapshot at gate time.", "param": "level", "compare_to": "current_autonomy", "lower_or_equal": "auto_allow", "higher": "always_confirm" },
+      "inputSchema": { "type": "object", "properties": { "level": { "type": "integer", "minimum": 0, "maximum": 10 } }, "required": ["level"], "additionalProperties": false }
+    },
+    {
+      "name": "reset_to_defaults",
+      "tier": "always_confirm",
+      "description": "The big red button. Restore FACTORY defaults (the immutable baked-in constant — NOT the persisted last-known-good, which Layer 1's automatic recovery uses) and restart clean. SETTINGS-ONLY (conversation history preserved; a separate explicit tool would wipe history). SURVIVES (deliberately, so a mid-rescue agent isn't disconnected and the floor stays armed): the per-install token, the engine allow-list, and the resurrection registration. NOTE: because the allow-list and token survive, a maliciously-paired engine host or a leaked token is NOT undone by reset — that remediation is a separate explicit UI action (re-pair / rotate token), offered from the reset flow. Autonomy resets to the fresh-install cap (3). Obeys response_ordering. In security.always_confirm_floor. Also the action behind the physical Reset button.",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+    },
+    {
+      "name": "apply_update",
+      "tier": "always_confirm",
+      "description": "Install a pending update — the ONE RCE-by-design tool. Guards (self_update, all NORMATIVE): signature-verified against the pinned key BEFORE staging (run_selftest is NOT the integrity gate); downgrade REFUSED (version must be > current — see self_update.anti_rollback); A/B staged with an OUT-OF-PROCESS rollback trigger that a hostile build cannot modify (self_update.out_of_process_rollback); rollback if the new build doesn't launch+heartbeat+bind+pass engine-reachability within 60 s (audio stages are NOT rollback triggers); disk precheck fails closed. Omitted version = 'latest' (channel-head). mode='updating' during staging; holds the recovery lock through the ~90 s window. In security.always_confirm_floor. Obeys response_ordering.",
+      "inputSchema": { "type": "object", "properties": { "version": { "type": "string", "description": "from check_for_update, or 'latest' (default)" } }, "additionalProperties": false }
+    }
+  ],
+  "$tool_count_note": "24 tools: 8 diagnostics (get_health, get_status, get_config, get_logs, list_audio_devices, run_selftest, get_capabilities, check_for_update) + 9 recovery (reconnect, enter_safe_mode, exit_safe_mode, repair_resurrection, restart_engine, restart_app, clear_cache, reset_to_defaults, apply_update) + 7 config dials (set_audio_input, set_audio_output, set_volume, set_engine_url, set_brain, set_wake_mode, set_autonomy).",
+
+  "telemetry": "Every mutating invocation that PASSES the gate and EXECUTES emits a content-free control.action event {tool, ok, error?, mode} per telemetry.v1 / ADR-058 D10 (adopted from design Open decision 3). Gate rejections (denied / rate_limited / already_recovering — no mutation happened) do NOT emit, so the self-heal-rate metric's denominator is 'actions taken', not 'actions attempted'. Content-free: no arg values, no transcripts.",
+
+  "$defs": {
+    "config": {
+      "$comment": "The user-changeable settings shape returned by get_config.active and .saved.",
+      "type": "object",
+      "properties": {
+        "engine_url": { "type": "string", "description": "scrubbed per diagnostics_privacy" },
+        "brain": { "type": "string" },
+        "audio_input_id": { "type": ["string", "null"] },
+        "audio_output_id": { "type": ["string", "null"] },
+        "volume": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "hands_free": { "type": "boolean" },
+        "autonomy": { "type": "integer", "minimum": 0, "maximum": 10 }
+      },
+      "required": ["engine_url", "brain", "volume", "hands_free", "autonomy"]
+    }
+  },
+  "result_shape": {
+    "$comment": "Same envelope as hands.mcp.v1. For read tools, 'result' is the tool's `returns` object; for actions, a short string. get_logs returns an object with a `lines` array (the envelope does not carry bare arrays).",
+    "type": "object",
+    "properties": {
+      "ok": { "type": "boolean" },
+      "result": { "type": ["object", "string"], "description": "On ok:true, the tool's returns object or an outcome string. On ok:false, MAY carry the human-readable reason string (so `error` can stay a bare switchable code)." },
+      "error": { "type": "string", "description": "On ok:false, the BARE reserved code (reserved_error_codes) or a template prefix (reserved_error_templates) — never with a free-form reason appended; the reason rides in `result`." }
+    },
+    "required": ["ok"],
+    "reserved_error_codes": ["denied", "unsupported", "timeout", "already_recovering", "rate_limited", "unsigned or untrusted update", "downgrade refused", "insufficient disk", "no update source configured"],
+    "reserved_error_templates": ["untrusted host: <host>", "not entitled to brain: <id>"],
+    "$errors_note": "reserved_error_codes are exact-match literals a consumer/test may switch on; reserved_error_templates carry a runtime <substitution>, so match by prefix, not equality."
+  }
+}
