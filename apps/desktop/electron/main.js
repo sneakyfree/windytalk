@@ -213,6 +213,28 @@ async function bootControlPlane() {
         return [];
       }
     },
+    // Self-update (contract self_update). INERT until Grant embeds the signing
+    // key: updateConfigured() is false, so updateSource returns null and
+    // apply_update/check_for_update stay forced-honest. When keyed, a GitHub-
+    // Releases source is constructed here. Built inert, never faked.
+    updateSource: () => null,
+    freeBytes: () => {
+      try {
+        const st = fs.statfsSync(paths.stateDir);
+        return st.bavail * st.bsize;
+      } catch {
+        return Number.MAX_SAFE_INTEGER;
+      }
+    },
+    stageUpdate: async (_artifact) => {
+      // IMMUTABILITY (self_update.out_of_process_rollback): apply_update A/B-
+      // swaps ONLY the app binary — it MUST NOT touch the resurrection service,
+      // the watchdog, or their configs. Staging is a no-op while INERT; the
+      // real A/B copy + pointer flip lands with the keyed source. It runs OFF
+      // the serving loop (a worker) so the heartbeat keeps bumping during
+      // mode='updating'.
+      throw new Error("staging unavailable: no update source configured");
+    },
     engineIsLocal: () => {
       try {
         const host = new URL(configStore.getActive().engine_url).hostname;

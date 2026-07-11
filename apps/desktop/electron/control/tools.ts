@@ -17,6 +17,8 @@ import type { LkgStore } from "./lkg.js";
 import type { LogRing } from "./logring.js";
 import { scrubDeviceName, scrubShortError } from "./scrub.js";
 import { resolveTier } from "./tier.js";
+import { applyUpdate, type ApplyResult, type ReleaseArtifact, type UpdateSource } from "./selfupdate.js";
+import { updateConfigured } from "./update-key.js";
 
 export interface Envelope {
   ok: boolean;
@@ -100,6 +102,12 @@ export interface ToolDeps {
    * yet, so only 'default' passes (forced-honest, never fake entitlement).
    */
   entitledBrains: () => string[];
+  /** The configured update source, or null when INERT (no key embedded). */
+  updateSource?: () => UpdateSource | null;
+  /** Free bytes on the install volume (apply_update disk precheck). */
+  freeBytes?: () => number;
+  /** Stage the verified artifact A/B + flip the pointer + write the marker. */
+  stageUpdate?: (artifact: ReleaseArtifact) => Promise<void>;
   now?: () => number;
   /** reconnect's pinned block ceiling (10 s prod; injectable for tests). */
   reconnectTimeoutMs?: number;
@@ -111,7 +119,7 @@ const MUTATING = new Set([
   "reconnect", "enter_safe_mode", "exit_safe_mode", "repair_resurrection",
   "restart_engine", "restart_app", "clear_cache", "reset_to_defaults",
   "set_audio_input", "set_audio_output", "set_volume", "set_engine_url",
-  "set_brain", "set_wake_mode", "set_autonomy",
+  "set_brain", "set_wake_mode", "set_autonomy", "apply_update",
 ]);
 
 const SET_TOOLS = new Set([
@@ -134,6 +142,7 @@ const CONFIRM_MESSAGES: Record<string, string> = {
   set_brain: "Switch which brain answers you?",
   set_wake_mode: "Let Windy Talk listen for 'Hey Windy' all the time?",
   set_autonomy: "Let the assistant do more without asking first?",
+  apply_update: "Install the latest Windy Talk update and restart?",
 };
 
 export class ControlTools {
@@ -155,7 +164,7 @@ export class ControlTools {
       "reconnect", "enter_safe_mode", "exit_safe_mode", "repair_resurrection",
       "restart_engine", "restart_app", "clear_cache", "reset_to_defaults",
       "set_audio_input", "set_audio_output", "set_volume", "set_engine_url",
-      "set_brain", "set_wake_mode", "set_autonomy",
+      "set_brain", "set_wake_mode", "set_autonomy", "apply_update",
     ];
   }
 
@@ -167,6 +176,12 @@ export class ControlTools {
     if (!this.isContractTool(tool)) return { ok: false, error: `unknown tool: ${tool}` };
     if (!this.builtTools().includes(tool)) {
       return { ok: false, error: "unsupported", result: "not built yet (control.mcp.v1 build in progress)" };
+    }
+    // apply_update is forced-honest INERT until the signing key is embedded:
+    // there is nothing to stage and nothing to authorize, so refuse before the
+    // lock + confirmer rather than prompt for an update that cannot happen.
+    if (tool === "apply_update" && !this.updateReady()) {
+      return { ok: false, error: "no update source configured" };
     }
     const gate = this.deps.coordinator.gate(tool, args, opts);
     if (!gate.proceed) return { ok: false, error: gate.error, result: gate.reason };
@@ -290,17 +305,7 @@ export class ControlTools {
       case "get_capabilities":
         return { ok: true, result: this.capabilities() };
       case "check_for_update":
-        // INERT until Grant embeds the signing key (self_update.source):
-        // forced-honest, never fake an update state.
-        return {
-          ok: true,
-          result: {
-            update_available: false,
-            current: this.deps.version,
-            latest: null,
-            reason: "no update source configured",
-          },
-        };
+        return { ok: true, result: await this.checkForUpdate() };
       case "reconnect": {
         const ok = await this.deps.reconnectEngine(this.deps.reconnectTimeoutMs ?? 10_000);
         return ok ? { ok: true, result: "reconnected" } : { ok: false, error: "timeout" };
@@ -398,8 +403,54 @@ export class ControlTools {
         }
         return this.setDial({ autonomy: level });
       }
+      case "apply_update":
+        return this.applyUpdateTool(args);
       default:
         return { ok: false, error: "unsupported" };
+    }
+  }
+
+  private updateReady(): boolean {
+    return updateConfigured() && !!this.deps.updateSource?.();
+  }
+
+  private async checkForUpdate(): Promise<Record<string, unknown>> {
+    // Read-only: is a newer known-good build available? Installs nothing.
+    // INERT (self_update.source) -> honest 'no update source configured'.
+    const base = { update_available: false, current: this.deps.version, latest: null as string | null };
+    if (!this.updateReady()) return { ...base, reason: "no update source configured" };
+    try {
+      const head = await this.deps.updateSource!()!.channelHead();
+      if (!head) return { ...base, reason: "no update source configured" };
+      const { compareSemver } = await import("./selfupdate.js");
+      const newer = compareSemver(head, this.deps.version) > 0;
+      return { update_available: newer, current: this.deps.version, latest: head, reason: null };
+    } catch (e) {
+      return { ...base, reason: `update check failed: ${scrubShortError(String(e))}` };
+    }
+  }
+
+  private async applyUpdateTool(args: Record<string, unknown>): Promise<Envelope> {
+    // The coordinator already holds apply_update's lock through the 90 s window.
+    this.markUpdating(true);
+    try {
+      const res: ApplyResult = await applyUpdate({
+        source: this.deps.updateSource?.() ?? null,
+        currentVersion: this.deps.version,
+        requestedVersion: typeof args.version === "string" ? args.version : undefined,
+        freeBytes: this.deps.freeBytes ?? (() => Number.MAX_SAFE_INTEGER),
+        stage: this.deps.stageUpdate ?? (async () => {}),
+      });
+      if (res.ok) {
+        // response_ordering: reply 'restarting', flush, act >=250 ms later.
+        setTimeout(() => this.deps.restartApp(), 350);
+        return { ok: true, result: res.result };
+      }
+      this.markUpdating(false); // no staging happened: leave 'updating'
+      return { ok: false, error: res.error, result: res.result };
+    } catch (e) {
+      this.markUpdating(false);
+      return { ok: false, error: `update failed: ${scrubShortError(String(e))}` };
     }
   }
 
@@ -408,9 +459,13 @@ export class ControlTools {
     return this.dispatch("enter_safe_mode", {}, { layer1: true });
   }
 
+  private updatingFlag = false;
+  markUpdating(on: boolean): void {
+    this.updatingFlag = on;
+  }
+
   mode(): "normal" | "safe" | "recovering" | "updating" {
-    // slice 5 adds 'updating'. A recovery in flight is the most informative
-    // transient state; safe mode is the salient resting state.
+    if (this.updatingFlag) return "updating"; // staging in flight (highest priority)
     if (this.deps.coordinator.recovering) return "recovering";
     if (this.deps.config.inSafeMode) return "safe";
     return "normal";

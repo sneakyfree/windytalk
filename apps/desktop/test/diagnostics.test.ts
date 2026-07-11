@@ -188,7 +188,7 @@ test("get_capabilities: tri-state; built=true, unbuilt=false, restart_engine deg
   assert.equal(caps.tools.get_health, true);
   assert.equal(caps.tools.reconnect, true);
   assert.equal(caps.tools.exit_safe_mode, true);
-  assert.equal(caps.tools.apply_update, false, "unbuilt slice reads false (forced-honest)");
+  assert.equal(caps.tools.apply_update, true, "built (INERT until keyed, but present)");
   assert.equal(caps.tools.set_volume, true);
   assert.equal(caps.tools.restart_engine, "degraded", "no child engine in the desktop client — deep reconnect");
   assert.equal(caps.tools.restart_app, true, "resurrection armed in this harness");
