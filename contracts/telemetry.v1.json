@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://windytalk.com/contracts/telemetry.v1.json",
-  "$comment": "telemetry.v1 — FROZEN 2026-07-09. Schema for the body of POST https://admin.windyword.ai/v1/events (per-emitter bearer token). Field names match the LIVE ingest as probed in docs/PROBE_RESULTS.md and re-probed during Task 0.4 (the ingest requires service/event_type/actor_type AND ts — the ts requirement surfaced only when a ts-less event 422'd on 2026-07-09; the genome's earlier sketch's 'event' field is event_type here). CONTENT-FREE BY CONSTRUCTION: additionalProperties:false everywhere and no free-text fields — ids, enums, timestamps, and numbers only. A payload carrying 'transcript', 'message', or any other unlisted key is schema-invalid (the live ingest 422s the same way). Emitted fire-and-forget by telemetry/emit.py (ADR-WA-001): async, ≤200ms, swallows all errors, no-op unless configured. Change control per contracts/README.md.",
+  "$comment": "telemetry.v1 \u2014 FROZEN 2026-07-09. Schema for the body of POST https://admin.windyword.ai/v1/events (per-emitter bearer token). Field names match the LIVE ingest as probed in docs/PROBE_RESULTS.md and re-probed during Task 0.4 (the ingest requires service/event_type/actor_type AND ts \u2014 the ts requirement surfaced only when a ts-less event 422'd on 2026-07-09; the genome's earlier sketch's 'event' field is event_type here). CONTENT-FREE BY CONSTRUCTION: additionalProperties:false everywhere and no free-text fields \u2014 ids, enums, timestamps, and numbers only. A payload carrying 'transcript', 'message', or any other unlisted key is schema-invalid (the live ingest 422s the same way). Emitted fire-and-forget by telemetry/emit.py (ADR-WA-001): async, \u2264200ms, swallows all errors, no-op unless configured. Change control per contracts/README.md. ADDITIVE v1.1 (2026-07-11): event_type 'control.action' + optional non-content fields 'ok' (boolean) and 'mode' (closed enum), required by control.mcp.v1's telemetry block ({tool, ok, error?, mode}); the frozen v1 vocabulary predates the control surface.",
   "title": "Windy Talk telemetry event batch",
   "type": "object",
   "properties": {
@@ -9,18 +9,30 @@
       "type": "array",
       "minItems": 1,
       "maxItems": 100,
-      "items": { "$ref": "#/$defs/event" }
+      "items": {
+        "$ref": "#/$defs/event"
+      }
     }
   },
-  "required": ["events"],
+  "required": [
+    "events"
+  ],
   "additionalProperties": false,
   "$defs": {
-    "id64": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "id64": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
     "event": {
       "type": "object",
       "properties": {
-        "service": { "const": "windytalk" },
-        "platform": { "const": "windy-talk" },
+        "service": {
+          "const": "windytalk"
+        },
+        "platform": {
+          "const": "windy-talk"
+        },
         "event_type": {
           "type": "string",
           "$comment": "Dotted event names, not free text. The v1 vocabulary; additive growth via v1.1.",
@@ -33,60 +45,187 @@
             "wake.triggered",
             "engine.error",
             "client.error",
-            "probe.task00"
+            "probe.task00",
+            "control.action"
           ]
         },
-        "actor_type": { "type": "string", "enum": ["human", "agent", "system"], "$comment": "Live ingest requires human|agent|system (NOT 'user') — verified against admin.windyword.ai during Task 1.8." },
-        "actor_id": { "$ref": "#/$defs/id64", "$comment": "Required by the live ingest when actor_type is human or agent (system is exempt). Pre-1.7 this is the session id; Task 1.7 sets it to the Eternitas passport / agent id." },
-        "session_id": { "$ref": "#/$defs/id64" },
-        "user_id": { "$ref": "#/$defs/id64" },
-        "agent_id": { "$ref": "#/$defs/id64" },
-        "ts": { "type": "string", "format": "date-time", "maxLength": 32 },
-        "dur_ms": { "type": "integer", "minimum": 0 },
-        "turns": { "type": "integer", "minimum": 0 },
-        "model": { "$ref": "#/$defs/id64", "$comment": "Model id via Mind — an identifier, never output text." },
-        "cost_microcents": { "type": "integer", "minimum": 0 },
+        "actor_type": {
+          "type": "string",
+          "enum": [
+            "human",
+            "agent",
+            "system"
+          ],
+          "$comment": "Live ingest requires human|agent|system (NOT 'user') \u2014 verified against admin.windyword.ai during Task 1.8."
+        },
+        "actor_id": {
+          "$ref": "#/$defs/id64",
+          "$comment": "Required by the live ingest when actor_type is human or agent (system is exempt). Pre-1.7 this is the session id; Task 1.7 sets it to the Eternitas passport / agent id."
+        },
+        "session_id": {
+          "$ref": "#/$defs/id64"
+        },
+        "user_id": {
+          "$ref": "#/$defs/id64"
+        },
+        "agent_id": {
+          "$ref": "#/$defs/id64"
+        },
+        "ts": {
+          "type": "string",
+          "format": "date-time",
+          "maxLength": 32
+        },
+        "dur_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "turns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "model": {
+          "$ref": "#/$defs/id64",
+          "$comment": "Model id via Mind \u2014 an identifier, never output text."
+        },
+        "cost_microcents": {
+          "type": "integer",
+          "minimum": 0
+        },
         "latency_ms": {
           "type": "object",
-          "$comment": "The §0.1 gates, measured per voice-session.v1 §8. Numbers only.",
+          "$comment": "The \u00a70.1 gates, measured per voice-session.v1 \u00a78. Numbers only.",
           "properties": {
-            "eos_to_first_audio_p90": { "type": "number", "minimum": 0 },
-            "barge_to_silent_p90": { "type": "number", "minimum": 0 },
-            "wake_to_listening_p90": { "type": "number", "minimum": 0 },
-            "transport_p90": { "type": "number", "minimum": 0 }
+            "eos_to_first_audio_p90": {
+              "type": "number",
+              "minimum": 0
+            },
+            "barge_to_silent_p90": {
+              "type": "number",
+              "minimum": 0
+            },
+            "wake_to_listening_p90": {
+              "type": "number",
+              "minimum": 0
+            },
+            "transport_p90": {
+              "type": "number",
+              "minimum": 0
+            }
           },
           "additionalProperties": false
         },
         "tool": {
           "type": "string",
-          "$comment": "hands.mcp.v1 tool name for tool.invoked events — the name only, never args.",
-          "enum": ["open_app", "web_search", "open_url", "type_text", "press_keys", "click_element", "mouse_click", "scroll", "read_screen", "list_apps", "screenshot", "run_shell"]
+          "$comment": "hands.mcp.v1 tool name for tool.invoked events \u2014 the name only, never args.",
+          "enum": [
+            "open_app",
+            "web_search",
+            "open_url",
+            "type_text",
+            "press_keys",
+            "click_element",
+            "mouse_click",
+            "scroll",
+            "read_screen",
+            "list_apps",
+            "screenshot",
+            "run_shell"
+          ]
         },
-        "tier_outcome": { "type": "string", "enum": ["auto", "approved", "denied"] },
-        "error_code": { "$ref": "#/$defs/id64", "$comment": "A code (e.g. voice-session.v1 §9 codes), never a message string." },
-        "region": { "type": "string", "maxLength": 16, "$comment": "Coarse only (country/region code) — granularity is a Grant privacy call (ADR-058 D10)." },
+        "tier_outcome": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "approved",
+            "denied"
+          ]
+        },
+        "error_code": {
+          "$ref": "#/$defs/id64",
+          "$comment": "A code (e.g. voice-session.v1 \u00a79 codes), never a message string."
+        },
+        "region": {
+          "type": "string",
+          "maxLength": 16,
+          "$comment": "Coarse only (country/region code) \u2014 granularity is a Grant privacy call (ADR-058 D10)."
+        },
         "metadata": {
           "type": "object",
-          "$comment": "INTEL-CONTRACT-V2 non-content descriptors. session.start requires app_version+os+install_id; session.end requires install_id (enforced live by the ingest). Whitelisted keys only — content-free.",
+          "$comment": "INTEL-CONTRACT-V2 non-content descriptors. session.start requires app_version+os+install_id; session.end requires install_id (enforced live by the ingest). Whitelisted keys only \u2014 content-free.",
           "properties": {
-            "app_version": { "type": "string", "maxLength": 32 },
-            "install_id": { "$ref": "#/$defs/id64" },
-            "os": { "type": "string", "maxLength": 32 },
-            "device": { "type": "string", "maxLength": 32 },
-            "region": { "type": "string", "maxLength": 16 },
-            "arch": { "type": "string", "maxLength": 16 },
-            "locale": { "type": "string", "maxLength": 16 }
+            "app_version": {
+              "type": "string",
+              "maxLength": 32
+            },
+            "install_id": {
+              "$ref": "#/$defs/id64"
+            },
+            "os": {
+              "type": "string",
+              "maxLength": 32
+            },
+            "device": {
+              "type": "string",
+              "maxLength": 32
+            },
+            "region": {
+              "type": "string",
+              "maxLength": 16
+            },
+            "arch": {
+              "type": "string",
+              "maxLength": 16
+            },
+            "locale": {
+              "type": "string",
+              "maxLength": 16
+            }
           },
           "additionalProperties": false
+        },
+        "ok": {
+          "type": "boolean",
+          "$comment": "control.action only: did the executed control-surface action succeed (control.mcp.v1 telemetry)."
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "normal",
+            "safe",
+            "recovering",
+            "updating"
+          ],
+          "$comment": "control.action only: the supervisor health mode at execution (control.mcp.v1 telemetry)."
         }
       },
-      "required": ["service", "platform", "event_type", "actor_type", "session_id", "ts"],
+      "required": [
+        "service",
+        "platform",
+        "event_type",
+        "actor_type",
+        "session_id",
+        "ts"
+      ],
       "additionalProperties": false,
       "allOf": [
         {
           "$comment": "Live ingest rule: actor_id is required when the actor is human or agent.",
-          "if": { "properties": { "actor_type": { "enum": ["human", "agent"] } } },
-          "then": { "required": ["actor_id"] }
+          "if": {
+            "properties": {
+              "actor_type": {
+                "enum": [
+                  "human",
+                  "agent"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "actor_id"
+            ]
+          }
         }
       ]
     }

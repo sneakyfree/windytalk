@@ -10,6 +10,10 @@ import { framePcm16, loadWakeDetector, WakeGate } from "./wake.js";
 interface WindytalkBridge {
   cfg: { engineUrl: string; handsUrl: string; appVersion: string; demo: string; autoMic: boolean };
   hands: { invoke(tool: string, args: unknown): Promise<{ ok: boolean; result?: string; error?: string }> };
+  control?: {
+    pushStatus(s: Status & { lastFrameAtMs: number | null }): void;
+    onCommand(cb: (cmd: { type: string; hands_free?: boolean; text?: string }) => void): void;
+  };
   quit(): void;
 }
 
@@ -50,7 +54,8 @@ export interface WindowWT {
 
 const BRIDGE: WindytalkBridge | undefined = (globalThis as unknown as { window: Window }).window?.windytalk;
 const ENGINE_URL = BRIDGE?.cfg.engineUrl ?? "ws://127.0.0.1:8788";
-const RECONNECT_MS = 1500;
+const RECONNECT_MS = 1500; // base delay; Layer 1 adds exponential backoff + jitter
+const RECONNECT_CAP_MS = 30000; // backoff ceiling — slow-retry forever, never give up
 const LIVENESS_MS = 25000; // §9: >25s with no engine frame ⇒ treat as abnormal close
 
 class RendererApp {
@@ -66,6 +71,9 @@ class RendererApp {
   private ready = false; // engine sent `ready` (gate binary until then, §11.1)
   private terminal = false; // bye/fatal ⇒ never auto-reconnect (§9)
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectAttempts = 0; // resets when the engine says ready
+  private reconnectNow = false; // an explicit reconnect command skips the delay
+  private lastFrameAtMs: number | null = null; // any engine ws message
   private livenessTimer: ReturnType<typeof setTimeout> | null = null;
   private listeners: StatusListener[] = [];
   private s: Status = {
@@ -79,9 +87,34 @@ class RendererApp {
 
   async start(): Promise<void> {
     await this.setupMic(); // never throws — surfaces mic errors into status
+    BRIDGE?.control?.onCommand((cmd) => this.onSupervisorCommand(cmd));
     this.connect();
     setInterval(() => window.face?.setLevel(this.playback.level()), 60);
+    setInterval(() => this.pushStatus(), 5000); // keep last_frame_s_ago fresh in main
     if (BRIDGE?.cfg.autoMic) this.setMic(true);
+  }
+
+  // -- supervisor (control.mcp.v1) bus ---------------------------------------
+
+  private pushStatus(): void {
+    BRIDGE?.control?.pushStatus({ ...this.s, lastFrameAtMs: this.lastFrameAtMs });
+  }
+
+  private onSupervisorCommand(cmd: { type: string; hands_free?: boolean; text?: string }): void {
+    if (cmd.type === "reconnect") {
+      // Explicit re-dial (the reconnect tool / Layer 1): clear terminal — §9's
+      // never-AUTO-reconnect rule gates the automatic path, not a commanded one.
+      this.terminal = false;
+      this.reconnectAttempts = 0;
+      this.reconnectNow = true;
+      if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.close();
+      else this.connect();
+    } else if (cmd.type === "apply-config") {
+      void this.setWake(!!cmd.hands_free); // safe mode: push-to-talk (wake off)
+    } else if (cmd.type === "notice" && cmd.text) {
+      window.face?.setCaption(cmd.text, "say");
+    }
   }
 
   // -- status broadcast ------------------------------------------------------
@@ -93,6 +126,7 @@ class RendererApp {
   private emit(patch: Partial<Status>): void {
     this.s = { ...this.s, ...patch };
     for (const cb of this.listeners) cb(this.s);
+    this.pushStatus();
   }
 
   // -- transport (rebuilt per socket, client reused) -------------------------
@@ -119,6 +153,7 @@ class RendererApp {
       this.armLiveness();
     };
     ws.onmessage = (e) => {
+      this.lastFrameAtMs = Date.now();
       this.armLiveness();
       this.client.onWireMessage(e.data);
     };
@@ -132,7 +167,13 @@ class RendererApp {
         return;
       }
       this.emit({ connection: "offline" });
-      this.reconnectTimer = setTimeout(() => this.connect(), RECONNECT_MS);
+      const delay = this.reconnectNow
+        ? 0
+        : Math.min(RECONNECT_MS * 2 ** this.reconnectAttempts, RECONNECT_CAP_MS) *
+          (0.75 + Math.random() * 0.5); // jitter so a fleet can't stampede
+      this.reconnectNow = false;
+      this.reconnectAttempts++;
+      this.reconnectTimer = setTimeout(() => this.connect(), delay);
     };
     ws.onerror = () => ws.close();
   }
@@ -149,6 +190,7 @@ class RendererApp {
     return {
       onReady: (sid) => {
         this.ready = true;
+        this.reconnectAttempts = 0; // healthy again: backoff resets
         this.emit({ connection: "online", sessionId: sid, lastError: null });
         if (this.micWanted) this.client.setMic(true); // re-assert mic on (re)connect
       },

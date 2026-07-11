@@ -20,5 +20,12 @@ contextBridge.exposeInMainWorld("windytalk", {
   hands: {
     invoke: (tool, args) => ipcRenderer.invoke("windytalk:hands", { tool, args }),
   },
+  // control.mcp.v1 status bus: the renderer pushes engine/mic status up to the
+  // supervisor (Layer 1 + get_health feed on it) and receives supervisor
+  // commands (reconnect, safe-mode overlay, a plain-English notice).
+  control: {
+    pushStatus: (s) => ipcRenderer.send("windytalk:status", s),
+    onCommand: (cb) => ipcRenderer.on("windytalk:cmd", (_e, cmd) => cb(cmd)),
+  },
   quit: () => ipcRenderer.send("windytalk:quit"),
 });

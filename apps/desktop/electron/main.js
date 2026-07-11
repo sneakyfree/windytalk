@@ -18,7 +18,15 @@ import { acquireInstanceLock } from "../dist/electron/control/instance.js";
 import { ControlServer } from "../dist/electron/control/server.js";
 import { makeAttestor } from "../dist/electron/control/attest.js";
 import { HeartbeatWriter } from "../dist/electron/control/heartbeat.js";
-import { ensureResurrection } from "../dist/electron/resurrection/installer.js";
+import { ensureResurrection, checkArmed } from "../dist/electron/resurrection/installer.js";
+import { ConfigStore } from "../dist/electron/control/config.js";
+import { EngineAllowList } from "../dist/electron/control/engine-allow.js";
+import { RecoveryCoordinator } from "../dist/electron/control/coordinator.js";
+import { CrashLoopDetector } from "../dist/electron/control/layer1.js";
+import { Supervisor } from "../dist/electron/control/supervisor.js";
+import { ControlTools } from "../dist/electron/control/tools.js";
+import { ControlMcp } from "../dist/electron/control/mcp.js";
+import { makeEmitter } from "../dist/electron/control/emit.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEMO = process.env.WINDYTALK_DEMO || "";
@@ -27,6 +35,7 @@ const HANDS_URL = process.env.WINDYTALK_HANDS_URL || "http://127.0.0.1:8781";
 const HANDS_TOKEN = process.env.WINDYTALK_HANDS_TOKEN || "";
 
 let mainWindow = null;
+let configStore = null; // the hands proxy gates on safe mode (hands off as a unit)
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -47,6 +56,18 @@ function createWindow() {
   });
   const query = DEMO ? `demo=${encodeURIComponent(DEMO)}` : "";
   win.loadFile(path.join(__dirname, "..", "renderer", "index.html"), { search: query });
+
+  const sup = global.__windytalkSupervisor;
+  if (sup) {
+    win.webContents.on("unresponsive", () =>
+      sup.supervisor.onRendererGone("unresponsive", () => win.webContents.forcefullyCrashRenderer()),
+    );
+    win.webContents.on("render-process-gone", (_e, details) => {
+      if (details.reason !== "clean-exit") {
+        sup.supervisor.onRendererGone(details.reason, () => win.webContents.reload());
+      }
+    });
+  }
 
   if (SHOT) {
     win.webContents.on("did-finish-load", async () => {
@@ -83,9 +104,10 @@ function surface(title, body) {
   }
 }
 
-// Boot the control plane (control.mcp.v1 slice 0): single-instance lock ->
-// :8782 wall -> heartbeat -> resurrection self-check/auto-repair. Returns false
-// when this launch must exit (a healthy holder was focused, or a squatter case).
+// Boot the control plane (control.mcp.v1): single-instance lock -> supervisor
+// (Layer 1 + coordinator + tools) -> :8782 wall -> heartbeat -> resurrection
+// self-check/auto-repair. Returns false when this launch must exit (a healthy
+// holder was focused, or a squatter case).
 async function bootControlPlane() {
   const paths = controlPaths();
   fs.mkdirSync(paths.configDir, { recursive: true, mode: 0o700 });
@@ -107,7 +129,52 @@ async function bootControlPlane() {
     return false;
   }
 
-  const server = new ControlServer({ token, onFocusRequest: focusMainWindow });
+  // -- supervisor graph (Layer 1 + coordinator + the tool surface) ------------
+  configStore = new ConfigStore(paths.configDir);
+  const allowList = new EngineAllowList(paths.configDir);
+  const coordinator = new RecoveryCoordinator();
+  let tools = null; // created below; the detector's trip closes over it
+  const detector = new CrashLoopDetector({
+    tripSafeMode: (reason) => {
+      console.log(`[windytalk] layer1 safe-mode trip: ${reason}`);
+      supervisor.notice("Something kept crashing, so I switched to safe mode to stay stable.");
+      if (tools) void tools.layer1TripSafeMode();
+    },
+    log: (m) => console.log(`[windytalk] ${m}`),
+  });
+  const supervisor = new Supervisor({
+    detector,
+    sendCommand: (cmd) => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("windytalk:cmd", cmd);
+    },
+    log: (m) => console.log(`[windytalk] ${m}`),
+  });
+  let resurrectionArmed = false;
+  tools = new ControlTools({
+    coordinator,
+    config: configStore,
+    allowList,
+    detector,
+    rendererStatus: () => supervisor.rendererStatus(),
+    reconnectEngine: (t) => supervisor.reconnectEngine(t),
+    applyActiveConfig: () => supervisor.applyActiveConfig(configStore.getActive()),
+    resurrectionArmed: () => resurrectionArmed,
+    version: app.getVersion(),
+    startedAtMs: Date.now(),
+    emit: makeEmitter(),
+  });
+  const mcp = new ControlMcp({ tools, version: app.getVersion() });
+
+  ipcMain.on("windytalk:status", (_evt, status) => supervisor.onRendererStatus(status));
+  global.__windytalkSupervisor = { supervisor, tools, configStore, detector };
+
+  const server = new ControlServer({
+    token,
+    onFocusRequest: focusMainWindow,
+    dispatch: (tool, args) => tools.dispatch(tool, args),
+    toolList: () => mcp.toolList(),
+    mcp: (req) => mcp.handle(req),
+  });
   const bind = await server.bind();
   if (bind.ok) {
     fs.writeFileSync(paths.portFile, String(bind.port) + "\n", { mode: 0o600 });
@@ -140,18 +207,32 @@ async function bootControlPlane() {
       : { cmd: process.execPath, args: [path.join(__dirname, "..")], cwd: path.join(__dirname, "..") };
     ensureResurrection({ appLaunch, log: (m) => console.log(`[windytalk] ${m}`) })
       .then((status) => {
+        resurrectionArmed = status.armed;
         if (!status.armed) surface("Windy Talk protection is off", status.detail);
         else console.log(`[windytalk] resurrection armed: ${status.detail}`);
       })
       .catch((e) => console.error(`[windytalk] resurrection self-check failed: ${String(e)}`));
   } else {
     console.log("[windytalk] resurrection install skipped (dev; set WINDYTALK_RESURRECTION=1 to arm)");
+    checkArmed({ appLaunch: { cmd: process.execPath, args: [] } })
+      .then((st) => { resurrectionArmed = st.armed; })
+      .catch(() => {});
+  }
+
+  // A crash-looping machine relaunches INTO safe mode; say so plainly.
+  if (configStore.inSafeMode) {
+    setTimeout(() => supervisor.notice("Running in safe mode — the reliable floor."), 3000);
   }
   return true;
 }
 
 // Proxy hands tool calls through main (avoids renderer CORS; adds the bearer token).
 ipcMain.handle("windytalk:hands", async (_evt, { tool, args }) => {
+  // Safe mode = hands off (contract safe_mode.nature); exit_safe_mode is the
+  // one thing that re-enables them as a unit.
+  if (configStore?.inSafeMode) {
+    return { ok: false, error: "denied", result: "hands are off in safe mode" };
+  }
   return new Promise((resolve) => {
     try {
       const url = new URL("/invoke", HANDS_URL);
