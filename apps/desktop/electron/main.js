@@ -203,6 +203,16 @@ async function bootControlPlane() {
     },
     resetCrashCounter: (why) => detector.resetCounter(why),
     notify: (text) => supervisor.notice(text),
+    entitledBrains: () => {
+      // The last-synced entitlement cache (offline-valid). Written by the
+      // Mind session layer when entitlements sync; absent = only 'default'.
+      try {
+        const list = JSON.parse(fs.readFileSync(path.join(paths.configDir, "entitled-brains.json"), "utf8"));
+        return Array.isArray(list) ? list.filter((b) => typeof b === "string") : [];
+      } catch {
+        return [];
+      }
+    },
     engineIsLocal: () => {
       try {
         const host = new URL(configStore.getActive().engine_url).hostname;
@@ -247,6 +257,7 @@ async function bootControlPlane() {
         cancelId: buttons.length - 1,
         noLink: true,
       };
+      const t0 = Date.now();
       const shown = win ? dialog.showMessageBox(win, opts) : dialog.showMessageBox(opts);
       // An unattended dialog must not hang the caller forever ('a denial
       // returns denied — never silence'): 60 s with no answer = deny.
@@ -257,6 +268,17 @@ async function bootControlPlane() {
       if (timed === null) {
         slog(`confirm for ${tool} unanswered for 60 s — denied`, "warn");
         return "deny";
+      }
+      // FAIL CLOSED on a non-interactive dialog. On a headless/broken display
+      // Electron's showMessageBox returns the DEFAULT button (index 0) without
+      // a human ever seeing it — indistinguishable from a real "Allow" by value
+      // alone. No human reacts to a fresh modal in under ~400 ms, so a sub-400ms
+      // return means the dialog could not genuinely engage a person: deny (a
+      // floor tool must NEVER auto-allow because the OS couldn't render).
+      const elapsed = Date.now() - t0;
+      if (elapsed < 400) {
+        slog(`confirm for ${tool} returned in ${elapsed}ms (no real interaction) — failing closed`, "warn");
+        return "unavailable";
       }
       const { response } = timed;
       if (response === 0) return "allow";

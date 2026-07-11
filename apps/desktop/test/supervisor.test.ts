@@ -93,6 +93,7 @@ test("HTTP routes: /tools, /invoke, /mcp all behind the wall; MCP notification -
     repairResurrection: async () => ({ armed: true, detail: "armed" }),
     restartApp: () => {},
     resetCrashCounter: () => {},
+    entitledBrains: () => [],
     probe: async () => null,
   });
   const mcp = new ControlMcp({ tools, version: "t" });
