@@ -13,6 +13,20 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
+function readFileSyncSafe(p: string): string | null {
+  try {
+    return fs.readFileSync(p, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+function writeFileAtomic(p: string, content: string): void {
+  const tmp = p + ".tmp";
+  fs.writeFileSync(tmp, content, { mode: 0o600 });
+  fs.renameSync(tmp, p);
+}
+
 import {
   BACKOFF_FRESH_RESET_S,
   BACKOFF_MAX_RELAUNCHES,
@@ -23,6 +37,13 @@ import {
   WATCH_INTERVAL_MS,
 } from "../control/constants.js";
 import { readHeartbeat } from "../control/heartbeat.js";
+import {
+  clearUpdateState,
+  readUpdateState,
+  rollbackDecision,
+  writeUpdateState,
+  type UpdateState,
+} from "../control/selfupdate.js";
 import {
   identityMatches,
   procIdentity,
@@ -62,6 +83,13 @@ export interface WatcherDeps {
   notify?: (title: string, body: string) => void;
   loadState?: () => BackoffState;
   saveState?: (s: BackoffState) => boolean;
+  /** Read the A/B update marker (null when no update is being verified). */
+  loadUpdateState?: () => UpdateState | null;
+  /** Did the running build attest itself? (fresh heartbeat @ toVersion + bind). */
+  updateAttested?: (state: UpdateState) => boolean;
+  /** Flip the A/B pointer back to previousBinary and clear the marker. */
+  rollbackUpdate?: (state: UpdateState) => void;
+  clearUpdate?: () => void;
   log?: (msg: string) => void;
 }
 
@@ -74,6 +102,31 @@ export async function checkOnce(deps: WatcherDeps): Promise<WatchAction> {
   const log = deps.log ?? (() => {});
   const nowS = now() / 1000;
   const state = (deps.loadState ?? (() => emptyState()))();
+
+  // Out-of-process A/B rollback (self_update.out_of_process_rollback): if an
+  // update is pending verification, the NEW build must attest within 60 s or we
+  // flip back to the previous known-good binary. Checked BEFORE staleness so a
+  // wedged new build rolls back (not just relaunches the broken binary).
+  const update = deps.loadUpdateState?.() ?? null;
+  if (update && update.pending) {
+    const attested = deps.updateAttested?.(update) ?? false;
+    const decision = rollbackDecision(update, attested, now());
+    if (decision === "commit") {
+      log(`update to ${update.toVersion} verified — committing`);
+      deps.clearUpdate?.();
+    } else if (decision === "rollback") {
+      log(`update to ${update.toVersion} failed to attest in 60 s — rolling back to ${update.fromVersion}`);
+      deps.rollbackUpdate?.(update);
+      (deps.notify ?? notifyOs)(
+        "Windy Talk restored a working version",
+        "A recent update didn't start correctly, so Windy Talk went back to the version that works.",
+      );
+      // The rollback relaunches the previous binary; done this tick.
+      return "kill-relaunch";
+    }
+    // 'wait': fall through to normal staleness handling (the new build may just
+    // be slow to boot; tier1/tier2 still relaunch it if it died outright).
+  }
 
   const hb = readHb(deps.heartbeatPath);
 
@@ -273,6 +326,34 @@ export async function runWatcherCli(argv: string[]): Promise<void> {
     relaunch: () => relaunchFromSpec(paths.resurrectionSpec, log),
     loadState: () => loadStateFile(paths.resurrectionState),
     saveState: (s) => saveStateFile(paths.resurrectionState, s),
+    loadUpdateState: () => readUpdateState(paths.stateDir),
+    updateAttested: (st) => {
+      // Independent of the app's own claim: the new build must have set its
+      // attested flag AND be writing a fresh heartbeat right now.
+      if (st.attested !== true) return false;
+      const hb = readHeartbeat(paths.heartbeat);
+      if (!hb) return false;
+      return Date.now() - hb.mtimeMs <= STALE_DEAD_S * 1000;
+    },
+    rollbackUpdate: (st) => {
+      // Flip the A/B pointer back to the previous known-good binary, then
+      // relaunch it. The spec was written pointing at the active binary; the
+      // installer owns the pointer, so here we rewrite the relaunch spec's cmd
+      // to previousBinary and relaunch, then clear the marker.
+      try {
+        const specPath = paths.resurrectionSpec;
+        const spec = JSON.parse(readFileSyncSafe(specPath) || "{}");
+        if (spec.launch) {
+          spec.launch.cmd = st.previousBinary;
+          writeFileAtomic(specPath, JSON.stringify(spec, null, 2));
+        }
+      } catch (e) {
+        log(`rollback: could not rewrite relaunch spec (${String(e)})`);
+      }
+      clearUpdateState(paths.stateDir);
+      relaunchFromSpec(paths.resurrectionSpec, log);
+    },
+    clearUpdate: () => clearUpdateState(paths.stateDir),
     log,
   };
   if (argv.includes("--loop")) {

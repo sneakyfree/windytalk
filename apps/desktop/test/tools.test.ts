@@ -187,10 +187,9 @@ test("enter_safe_mode: persists the flag, pushes the overlay, idempotent, emits"
 test("dispatch: unknown tool vs contract-but-unbuilt tool are distinct honest errors", async () => {
   const h = harness();
   const unknown = await h.tools.dispatch("frobnicate");
-  assert.equal(unknown.error, "unknown tool: frobnicate");
-  const unbuilt = await h.tools.dispatch("apply_update", {});
-  assert.equal(unbuilt.error, "unsupported");
-  assert.match(String(unbuilt.result), /not built yet/);
+  assert.equal(unknown.error, "unknown tool: frobnicate", "a non-contract name is 'unknown tool'");
+  const inert = await h.tools.dispatch("apply_update", {});
+  assert.equal(inert.error, "no update source configured", "a built-but-INERT tool is honest, never 'unsupported'");
   fs.rmSync(h.dir, { recursive: true, force: true });
 });
 
@@ -215,6 +214,18 @@ test("layer1 trip: enters safe mode even when the surface budget is exhausted", 
 
 // -- MCP compliance (NORMATIVE per $mcp_protocol_note) ---------------------------
 
+test("apply_update: INERT (no key) -> 'no update source configured'; no lock taken, no confirm prompt", async () => {
+  const h = harness();
+  h.config.setSaved({ autonomy: 10 });
+  const res = await h.tools.dispatch("apply_update", {});
+  assert.deepEqual(res, { ok: false, error: "no update source configured" });
+  // Inert refusal happens BEFORE the coordinator/confirmer: an immediate retry
+  // is not rate-limited (nothing executed) and no dialog was drawn.
+  const again = await h.tools.dispatch("apply_update", { version: "9.9.9" });
+  assert.deepEqual(again, { ok: false, error: "no update source configured" });
+  fs.rmSync(h.dir, { recursive: true, force: true });
+});
+
 test("MCP: initialize echoes protocolVersion 2025-06-18; notifications/initialized -> no response", async () => {
   const h = harness();
   const mcp = new ControlMcp({ tools: h.tools, version: "0.1.0-test" });
@@ -232,9 +243,8 @@ test("MCP: tools/list advertises exactly the built tools, with the contract's de
   const res = await mcp.handle({ jsonrpc: "2.0", id: 2, method: "tools/list" });
   const tools = (res?.result as { tools: { name: string; description: string }[] }).tools;
   const names = tools.map((t) => t.name).sort();
-  assert.equal(names.length, 23, "every contract tool except the inert-until-keyed apply_update");
-  assert.ok(!names.includes("apply_update"));
-  assert.ok(names.includes("set_autonomy") && names.includes("get_health"));
+  assert.equal(names.length, 24, "all 24 control tools are built (apply_update INERT until keyed)");
+  assert.ok(names.includes("apply_update") && names.includes("set_autonomy") && names.includes("get_health"));
   const contract = loadContractTools();
   if (contract.size > 0) {
     const gh = tools.find((t) => t.name === "get_health");
