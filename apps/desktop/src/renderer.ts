@@ -5,6 +5,7 @@
 
 import { Playback } from "./playback.js";
 import { type Callbacks, VoiceClient } from "./protocol.js";
+import { framePcm16, loadWakeDetector, WakeGate } from "./wake.js";
 
 interface WindytalkBridge {
   cfg: { engineUrl: string; handsUrl: string; appVersion: string; demo: string; autoMic: boolean };
@@ -41,6 +42,7 @@ declare global {
 export interface WindowWT {
   toggleMic(): void;
   setMic(on: boolean): void;
+  setWake(on: boolean): void;
   status(): Status;
   onStatus(cb: StatusListener): void;
   quit(): void;
@@ -59,6 +61,8 @@ class RendererApp {
   private worklet: AudioWorkletNode | null = null;
   private micStream: MediaStream | null = null;
   private micWanted = false; // the user's intent (button)
+  private wake: WakeGate | null = null; // "Hey Windy" gate (null until a model loads)
+  private wakeMode = false; // hands-free: gate mic frames through the wake word
   private ready = false; // engine sent `ready` (gate binary until then, §11.1)
   private terminal = false; // bye/fatal ⇒ never auto-reconnect (§9)
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -197,7 +201,16 @@ class RendererApp {
       worklet.port.onmessage = (e) => {
         const d = e.data;
         if (d.type === "frame" && this.micWanted && this.ready) {
-          this.client.pushMicFrame(new Uint8Array(d.pcm));
+          const bytes = new Uint8Array(d.pcm);
+          // Hands-free: hold frames locally until the wake word fires; then let
+          // them flow until the gate drifts back to sleep. Off ⇒ push-to-talk.
+          if (this.wakeMode && this.wake) {
+            const { forward, transition } = this.wake.feed(framePcm16(bytes), this.s.state === "speaking");
+            if (transition === "wake") window.face?.setState("listening");
+            else if (transition === "sleep") window.face?.setState("paused");
+            if (!forward) return;
+          }
+          this.client.pushMicFrame(bytes);
         } else if (d.type === "barge") {
           this.client.localBargeTrigger();
         }
@@ -221,6 +234,27 @@ class RendererApp {
     this.setMic(!this.micWanted);
   }
 
+  // Hands-free "Hey Windy" mode. Loads the local wake model on first enable; if
+  // no model is bundled yet (Grant-gated training), it stays in push-to-talk and
+  // says so rather than silently doing nothing.
+  async setWake(on: boolean): Promise<void> {
+    if (on && !this.wake) {
+      const det = await loadWakeDetector();
+      this.wake = det ? new WakeGate(det) : null;
+      if (!this.wake) {
+        this.emit({ lastError: "Hands-free needs the 'Hey Windy' model (not bundled yet) — using push-to-talk." });
+        this.wakeMode = false;
+        return;
+      }
+    }
+    this.wakeMode = on && this.wake != null;
+    if (this.wakeMode) {
+      this.wake?.sleep(); // start asleep — armed but not forwarding
+      this.setMic(true); // keep the mic capturing so the gate can hear the wake word
+      window.face?.setState("paused");
+    }
+  }
+
   private async dispatchTool(callId: string, tool: string, args: unknown): Promise<void> {
     // Route through the main process (no CORS, token added there).
     try {
@@ -241,6 +275,7 @@ const app = new RendererApp();
 const wt: WindowWT = {
   toggleMic: () => app.toggleMic(),
   setMic: (on) => app.setMic(on),
+  setWake: (on) => void app.setWake(on),
   status: () => app.status(),
   onStatus: (cb) => app.onStatus(cb),
   quit: () => app.quit(),
