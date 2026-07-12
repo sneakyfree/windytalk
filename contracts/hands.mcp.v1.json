@@ -1,5 +1,5 @@
 {
-  "$comment": "hands.mcp.v1 — FROZEN 2026-07-09. The tool surface the agent sees, exposed by hands/surface.py as both MCP tools and local HTTP (ADR-058 D4 co-tenant pattern). Tool list ported from the proven prototype (reference/agent.py, 12 tools). Every tool carries an ADR-010 §9 trust tier. Change control per contracts/README.md: additive → v1.1 via PR; breaking → v2 + tell Grant. rev.2 2026-07-12 (additive, GAP_CLOSING_PLAN Phase 0): type_text gains an optional 'target' arg + focus-guard semantics — it refuses (ok:false error:'refused: ...') when the focused window is a terminal, can't be resolved, or doesn't match 'target'. rev.3 2026-07-12 (additive, Phase 1): mouse_click coordinates defined as pixels of the most recent screenshot, auto-mapped to the pointer's logical space (identity when no screenshot on record).",
+  "$comment": "hands.mcp.v1 — FROZEN 2026-07-09. The tool surface the agent sees, exposed by hands/surface.py as both MCP tools and local HTTP (ADR-058 D4 co-tenant pattern). Tool list ported from the proven prototype (reference/agent.py, 12 tools). Every tool carries an ADR-010 §9 trust tier. Change control per contracts/README.md: additive → v1.1 via PR; breaking → v2 + tell Grant. rev.2 2026-07-12 (additive, GAP_CLOSING_PLAN Phase 0): type_text gains an optional 'target' arg + focus-guard semantics — it refuses (ok:false error:'refused: ...') when the focused window is a terminal, can't be resolved, or doesn't match 'target'. rev.3 2026-07-12 (additive, Phase 1): mouse_click coordinates defined as pixels of the most recent screenshot, auto-mapped to the pointer's logical space (identity when no screenshot on record). rev.4 2026-07-12 (additive, Phase 2): click_element gains the vision-spine fallback (screenshot→local vision model→coordinate click, env WINDYTALK_VISION_URL) for elements accessibility can't see.",
   "contract": "hands.mcp.v1",
   "tiers": {
     "$comment": "Enforced by hands/tiers.py at the surface, not by the client or agent. auto_allow: execute immediately. ask_first: per-invocation user confirmation required; the user MAY grant a session-scoped always-allow upgrade for the tool. always_confirm: per-invocation confirmation, no session upgrade possible. Confirmation is delivered through the active client (voice prompt or UI dialog); a denial returns ok:false error:'denied' to the agent — never silence. Tiers are per-tool in v1; per-argument escalation is a v1.1 candidate.",
@@ -68,7 +68,7 @@
     {
       "name": "click_element",
       "tier": "auto_allow",
-      "description": "Click an on-screen button, link, or menu item by its visible label (uses the accessibility tree — semantic, focus-independent).",
+      "description": "Click an on-screen button, link, or menu item by its visible label. Fast lane = the accessibility tree (semantic, coord-free); when accessibility can't see the element (e.g. Chrome) and a vision model is configured, it falls back to screenshot→vision→coordinate click. Prefer this over mouse_click.",
       "inputSchema": {
         "type": "object",
         "properties": { "label": { "type": "string" } },
