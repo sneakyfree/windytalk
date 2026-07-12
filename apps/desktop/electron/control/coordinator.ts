@@ -153,8 +153,14 @@ export class RecoveryCoordinator {
       // run_selftest / repair_resurrection fall through: not blocked by the lock.
     }
 
-    // 2) DEBOUNCE — measured on EXECUTED calls with the same tool+args key.
-    let charge: (() => void) | null = null;
+    // 2) DEBOUNCE + 3) CEILING — measured on EXECUTED calls with the same
+    //    tool+args key. RESERVE-then-REFUND: the counters are charged HERE, at
+    //    gate time, so a second same-tool call that arrives while the first is
+    //    still awaiting its confirmer already sees the reservation (a deferred
+    //    charge let two overlapping calls both slip past debounce/ceiling). The
+    //    reservation is REFUNDED if the call never executes (denied / released
+    //    without commit) — so a rejected call still never counts, as pinned.
+    let refund: (() => void) | null = null;
     if (!opts.layer1) {
       const key = this.key(tool, args);
       const last = this.lastByKey.get(key);
@@ -162,28 +168,40 @@ export class RecoveryCoordinator {
         return { proceed: false, error: "rate_limited", reason: "debounced (5 s same-call window)" };
       }
 
-      // 3) CEILING — 5 executed calls per tool per rolling 300 s.
       const times = (this.executed.get(tool) ?? []).filter((t) => nowMs - t <= CEILING_WINDOW_MS);
-      this.executed.set(tool, times);
       if (times.length >= CEILING_CALLS) {
+        this.executed.set(tool, times);
         return { proceed: false, error: "rate_limited", reason: "over the 5-per-300s ceiling" };
       }
 
-      // The counters charge at ticket.commit() — after the tier confirmer —
-      // so a user-DENIED call never counts as executed (as pinned).
-      charge = () => {
-        times.push(this.now());
-        this.lastByKey.set(key, this.now());
+      // Reserve immediately (visible to any concurrent gate for this tool/key).
+      times.push(nowMs);
+      this.executed.set(tool, times);
+      const prevLast = this.lastByKey.get(key);
+      this.lastByKey.set(key, nowMs);
+
+      refund = () => {
+        const arr = this.executed.get(tool);
+        if (arr) {
+          const i = arr.indexOf(nowMs);
+          if (i >= 0) arr.splice(i, 1);
+        }
+        // Restore the debounce marker only if no later call has overwritten it
+        // (else that call's reservation stands and must not be clobbered).
+        if (this.lastByKey.get(key) === nowMs) {
+          if (prevLast === undefined) this.lastByKey.delete(key);
+          else this.lastByKey.set(key, prevLast);
+        }
       };
     }
 
-    return this.grant(tool, isHolder ? nowMs : 0, charge, preemptEpoch);
+    return this.grant(tool, isHolder ? nowMs : 0, refund, preemptEpoch);
   }
 
   private grant(
     tool: string,
     lockAt: number,
-    charge: (() => void) | null = null,
+    refund: (() => void) | null = null,
     preemptEpoch: number | null = null,
   ): GateOutcome {
     // Reclaim only now that the call has passed every gate check (lock +
@@ -205,7 +223,8 @@ export class RecoveryCoordinator {
       };
     }
     const coordinator = this;
-    let charged = false;
+    let committed = false;
+    let released = false;
     const ticket: Ticket = {
       tool,
       epoch,
@@ -213,22 +232,33 @@ export class RecoveryCoordinator {
         return epoch !== 0 && coordinator.abandonedEpochs.has(epoch);
       },
       commit(): void {
-        if (!charged) {
-          charged = true;
-          charge?.();
-          // The handler starts NOW (the confirmer, if any, has resolved): reset
-          // the ceiling clock so a slow confirm never ate into the handler's
-          // window, and switch the lock to its post-commit ceiling.
-          if (epoch !== 0 && coordinator.lock?.epoch === epoch) {
-            coordinator.lock.since = coordinator.now();
-            coordinator.lock.committed = true;
-          }
+        if (committed) return;
+        committed = true;
+        // The reservation charged at gate is now PERMANENT (the call executes).
+        // The handler starts NOW (the confirmer, if any, has resolved): reset the
+        // ceiling clock so a slow confirm never ate into the handler's window,
+        // and switch the lock to its post-commit ceiling.
+        if (epoch !== 0 && coordinator.lock?.epoch === epoch) {
+          coordinator.lock.since = coordinator.now();
+          coordinator.lock.committed = true;
         }
       },
       release(): void {
-        if (epoch === 0) return;
-        coordinator.abandonedEpochs.delete(epoch); // done with this epoch either way
-        if (coordinator.lock?.epoch === epoch) coordinator.lock = null;
+        if (released) return;
+        released = true;
+        // Refund the reservation unless the call genuinely executed to a kept
+        // result — i.e. refund when it never committed (denied / errored
+        // pre-commit) OR when it was preempted (abandoned -> returns
+        // already_recovering, a rejected outcome that must not count). So a
+        // ticket counts toward debounce/ceiling only if it committed AND was
+        // not abandoned. Applies to lock-less set_*/run_selftest tickets too
+        // (epoch 0 but still reserved).
+        const wasAbandoned = epoch !== 0 && coordinator.abandonedEpochs.has(epoch);
+        if (!committed || wasAbandoned) refund?.();
+        if (epoch !== 0) {
+          coordinator.abandonedEpochs.delete(epoch);
+          if (coordinator.lock?.epoch === epoch) coordinator.lock = null;
+        }
       },
     };
     return { proceed: true, ticket };

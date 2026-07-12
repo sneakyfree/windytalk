@@ -215,3 +215,16 @@ test("MCP: notifications/initialized still returns null; a real request still an
   assert.equal((init?.result as Record<string, unknown>).protocolVersion, "2025-06-18");
   assert.equal(init?.id, 5);
 });
+
+test("repair_resurrection capability: FALSE where re-arming is not feasible (privilege-blocked), TRUE otherwise", async () => {
+  const blocked = toolsHarness({ resurrectionRepairable: () => false });
+  const capsBlocked = (await blocked.tools.dispatch("get_capabilities")).result as {
+    tools: Record<string, boolean | string>;
+  };
+  assert.equal(capsBlocked.tools.repair_resurrection, false, "must be false where re-arming can't work here");
+  const ok = toolsHarness({ resurrectionRepairable: () => true });
+  const capsOk = (await ok.tools.dispatch("get_capabilities")).result as {
+    tools: Record<string, boolean | string>;
+  };
+  assert.equal(capsOk.tools.repair_resurrection, true);
+});

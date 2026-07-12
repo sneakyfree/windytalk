@@ -271,3 +271,63 @@ test("a DENIED call never charges the executed counters (commit is post-confirme
   const g3 = coord.gate("restart_engine");
   assert.ok(!g3.proceed && g3.error === "rate_limited", "the EXECUTED call does debounce");
 });
+
+test("INTERLEAVE: overlapping same-tool calls (both awaiting their confirmer) cannot both slip past the ceiling", () => {
+  const c = clock();
+  const coord = new RecoveryCoordinator({ now: c.now });
+  // Reserve-at-gate: 5 run_selftest calls gate but do NOT commit yet (all
+  // sitting in their confirmer/execute window at once). The reservation is
+  // charged at gate, so the 6th must already see the full budget consumed —
+  // the old deferred-charge model let all 6+ slip through.
+  const tickets = [];
+  for (let i = 0; i < 5; i++) {
+    // distinct args so debounce (same-key) doesn't mask the ceiling test
+    const g = coord.gate("run_selftest", { n: i });
+    assert.ok(g.proceed, `overlapping call ${i} should reserve`);
+    tickets.push(g);
+  }
+  const sixth = coord.gate("run_selftest", { n: 99 });
+  assert.equal(sixth.proceed, false, "the 6th overlapping call must be rate_limited even before any commits");
+  assert.equal((sixth as { error: string }).error, "rate_limited");
+  // Commit them all (they executed); the ceiling stays consumed.
+  for (const g of tickets) if (g.proceed) g.ticket.commit();
+  for (const g of tickets) if (g.proceed) g.ticket.release();
+});
+
+test("REFUND: a reserved-but-denied call frees its ceiling slot (rejected calls never count)", () => {
+  const c = clock();
+  const coord = new RecoveryCoordinator({ now: c.now });
+  // 5 distinct-arg calls reserve + commit (executed) -> ceiling full.
+  for (let i = 0; i < 5; i++) {
+    const g = coord.gate("run_selftest", { n: i });
+    assert.ok(g.proceed);
+    g.ticket.commit();
+    g.ticket.release();
+  }
+  assert.equal(coord.gate("run_selftest", { n: 6 }).proceed, false, "ceiling is full");
+  // A denied call (reserved, released without commit) must refund and NOT
+  // permanently consume a slot — but here the ceiling is already full, so it
+  // rate-limits; prove the refund by denying one of the committed ones is N/A.
+  // Instead: reserve one MORE distinct call after aging one out.
+  c.advance(300_001); // all 5 age out of the window
+  const g = coord.gate("run_selftest", { n: 7 });
+  assert.ok(g.proceed, "window cleared");
+  g.ticket.release(); // DENIED (no commit) -> refund
+  // The denied call must not have consumed the slot: 5 fresh calls still fit.
+  for (let i = 0; i < 5; i++) {
+    const gi = coord.gate("run_selftest", { n: 100 + i });
+    assert.ok(gi.proceed, `denied call must have refunded its slot (fresh call ${i})`);
+    gi.ticket.commit();
+    gi.ticket.release();
+  }
+});
+
+test("REFUND lock-less set_* ticket: a denied set_* refunds its debounce reservation", () => {
+  const c = clock();
+  const coord = new RecoveryCoordinator({ now: c.now });
+  const g1 = coord.gate("set_volume", { level: 50 }); // epoch 0 (no lock) but reserves
+  assert.ok(g1.proceed);
+  g1.ticket.release(); // denied, no commit -> refund the debounce marker
+  const g2 = coord.gate("set_volume", { level: 50 });
+  assert.ok(g2.proceed, "a denied set_* must not debounce the retry");
+});
