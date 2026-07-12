@@ -71,6 +71,14 @@ export interface ToolDeps {
   /** Push the active (overlay) config to the renderer (safe-mode entry). */
   applyActiveConfig: () => void;
   resurrectionArmed: () => boolean;
+  /**
+   * Is re-arming the resurrection service actually feasible on THIS box (for
+   * get_capabilities.repair_resurrection)? False where a real arm attempt has
+   * failed — the honest proxy for "privilege blocks it" (the boot self-check
+   * always attempts a repair, so unarmed-after-attempt means re-arming isn't
+   * working here). Defaults true before any attempt. Absent -> assume true.
+   */
+  resurrectionRepairable?: () => boolean;
   version: string;
   startedAtMs: number;
   emit: Emitter;
@@ -624,6 +632,13 @@ export class ControlTools {
       if (t === "restart_app") {
         // Without an armed resurrection service the exit would strand her.
         tools[t] = this.deps.resurrectionArmed();
+        continue;
+      }
+      if (t === "repair_resurrection") {
+        // FALSE where re-arming genuinely can't work here (privilege-blocked),
+        // per platform_note — not unconditionally true. The tool still returns
+        // an honest 'unsupported' + manual step at invoke time.
+        tools[t] = this.deps.resurrectionRepairable ? this.deps.resurrectionRepairable() : true;
         continue;
       }
       tools[t] = true;

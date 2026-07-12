@@ -162,6 +162,10 @@ async function bootControlPlane() {
     log: (m) => slog(m, "warn"),
   });
   let resurrectionArmed = false;
+  // Re-arming feasibility (get_capabilities.repair_resurrection): starts
+  // optimistic; a real arm attempt that fails flips it false (privilege-blocked
+  // is the case that matters), a success flips it back true.
+  let resurrectionRepairable = true;
   tools = new ControlTools({
     coordinator,
     config: configStore,
@@ -171,6 +175,7 @@ async function bootControlPlane() {
     reconnectEngine: (t) => supervisor.reconnectEngine(t),
     applyActiveConfig: () => supervisor.applyActiveConfig(configStore.getActive()),
     resurrectionArmed: () => resurrectionArmed,
+    resurrectionRepairable: () => resurrectionRepairable,
     version: app.getVersion(),
     startedAtMs: Date.now(),
     emit: makeEmitter(),
@@ -192,6 +197,7 @@ async function bootControlPlane() {
         : { cmd: process.execPath, args: [path.join(__dirname, "..")], cwd: path.join(__dirname, "..") };
       const status = await ensureResurrection({ appLaunch, log: (m) => slog(m) });
       resurrectionArmed = status.armed;
+      resurrectionRepairable = status.armed; // it just tried: success=repairable, fail=not here
       return status;
     },
     restartApp: () => {
@@ -370,6 +376,7 @@ async function bootControlPlane() {
     ensureResurrection({ appLaunch, log: (m) => console.log(`[windytalk] ${m}`) })
       .then((status) => {
         resurrectionArmed = status.armed;
+        resurrectionRepairable = status.armed; // the boot repair just ran
         if (!status.armed) surface("Windy Talk protection is off", status.detail);
         else console.log(`[windytalk] resurrection armed: ${status.detail}`);
       })
