@@ -21,7 +21,14 @@ import base64
 import shutil
 import subprocess
 
-from .base import HandsBackend
+from .base import HandsBackend, UnsupportedTool
+
+# Interpreter chain: Windows PowerShell 5.1 (`powershell`) is the historical
+# default, but a modern / Windows-11-lean box may ship ONLY PowerShell 7
+# (`pwsh`). Pick the first that's actually on PATH — the same in-box .NET
+# assemblies drive every tool regardless of which one runs them, so this one
+# fix makes every tool work on a pwsh-only machine.
+_PS_BINARIES = ("powershell", "pwsh")
 
 _APP_ALIASES = {
     "browser": "msedge", "web browser": "msedge", "chrome": "chrome",
@@ -49,11 +56,27 @@ _SK_KEYS = {
 }
 
 
+def _ps_binary():
+    """The first PowerShell interpreter on PATH, or None. Wrapped so tests can
+    monkeypatch a single seam."""
+    for binary in _PS_BINARIES:
+        if shutil.which(binary) is not None:
+            return binary
+    return None
+
+
 def _ps(script: str, timeout: float = 20) -> str:
-    """Run a PowerShell snippet via -EncodedCommand; return stdout. Raises on error."""
+    """Run a PowerShell snippet via -EncodedCommand on the first available
+    interpreter (powershell, else pwsh); return stdout. The interpreter choice is
+    the ONLY fallback — a launched-but-failed script is a real error surfaced as
+    such (never re-run on the other interpreter, which could double a side effect
+    like a half-typed SendKeys). No interpreter at all -> UnsupportedTool."""
+    binary = _ps_binary()
+    if binary is None:
+        raise UnsupportedTool("no PowerShell interpreter (powershell / pwsh) on PATH")
     encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
     r = subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+        [binary, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
         capture_output=True, text=True, timeout=timeout)
     if r.returncode != 0:
         raise RuntimeError((r.stderr or "powershell failed").strip()[:400])
@@ -79,11 +102,12 @@ class WindowsBackend(HandsBackend):
     name = "windows"
 
     def capabilities(self) -> dict[str, bool]:
-        # Every primitive is built on PowerShell + in-box .NET assemblies, so the one
-        # real dependency is that `powershell` is on PATH. If it isn't (PowerShell-7-
-        # only "pwsh" box), be honest and report nothing works rather than assume-True.
+        # Every primitive is built on PowerShell + in-box .NET assemblies, so the
+        # one real dependency is that SOME PowerShell (Windows 5.1 `powershell` OR
+        # 7 `pwsh`) is on PATH. If neither is, be honest and report nothing works
+        # rather than assume-True.
         from .base import TOOL_NAMES
-        has_ps = shutil.which("powershell") is not None
+        has_ps = _ps_binary() is not None
         return {t: has_ps for t in TOOL_NAMES}
 
     # -- apps / web ------------------------------------------------------------

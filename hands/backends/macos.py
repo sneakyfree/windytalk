@@ -17,11 +17,12 @@ open. cliclick installed via `brew install cliclick`.
 """
 from __future__ import annotations
 
+import importlib.util
 import shutil
 import subprocess
 from urllib.parse import quote_plus
 
-from .base import HandsBackend, UnsupportedTool
+from .base import HandsBackend, Mechanism, run_chain
 
 _APP_ALIASES = {
     "browser": "Safari", "web browser": "Safari", "chrome": "Google Chrome",
@@ -61,6 +62,64 @@ def _cliclick(*args: str, timeout: float = 10) -> None:
     subprocess.run(["cliclick", *args], check=True, capture_output=True, timeout=timeout)
 
 
+def _which(tool: str):
+    return shutil.which(tool)  # a single seam tests can monkeypatch
+
+
+# AppleScript System Events key codes for special keys (letters go via `keystroke`).
+_OSA_KEYCODES = {
+    "return": 36, "enter": 36, "tab": 48, "space": 49, "delete": 51,
+    "backspace": 51, "escape": 53, "esc": 53, "left": 123, "right": 124,
+    "down": 125, "up": 126, "home": 115, "end": 119, "pageup": 116, "pagedown": 121,
+}
+_OSA_MODS = {"cmd": "command down", "command": "command down", "ctrl": "control down",
+             "control": "control down", "alt": "option down", "option": "option down",
+             "opt": "option down", "shift": "shift down", "super": "command down",
+             "win": "command down", "meta": "command down"}
+
+
+def _osa_type(text: str) -> None:
+    # Built into macOS (no brew needed): the stock-Mac typing path when cliclick
+    # is absent. Requires the same Accessibility permission the read/click tools do.
+    _osa(f'tell application "System Events" to keystroke "{_osa_str(text)}"')
+
+
+def _osa_press(parts: list[str]) -> None:
+    mods = [_OSA_MODS[p] for p in parts if p in _OSA_MODS]
+    keys = [p for p in parts if p not in _OSA_MODS]
+    using = (" using {" + ", ".join(mods) + "}") if mods else ""
+    lines = ['tell application "System Events"']
+    for k in keys:
+        if k in _OSA_KEYCODES:
+            lines.append(f"  key code {_OSA_KEYCODES[k]}{using}")
+        else:
+            lines.append(f'  keystroke "{_osa_str(k)}"{using}')
+    lines.append("end tell")
+    _osa("\n".join(lines))
+
+
+def _quartz_available() -> bool:
+    return importlib.util.find_spec("Quartz") is not None
+
+
+def _quartz_click(x: int, y: int, button: str) -> None:
+    import Quartz  # pyobjc — a native mouse path that needs neither cliclick nor AX
+    right = button == "right"
+    down = Quartz.kCGEventRightMouseDown if right else Quartz.kCGEventLeftMouseDown
+    up = Quartz.kCGEventRightMouseUp if right else Quartz.kCGEventLeftMouseUp
+    btn = Quartz.kCGMouseButtonRight if right else Quartz.kCGMouseButtonLeft
+    pos = Quartz.CGPointMake(float(x), float(y))
+    for ev_type in (down, up):
+        ev = Quartz.CGEventCreateMouseEvent(None, ev_type, pos, btn)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+
+
+def _quartz_scroll(amount: int) -> None:
+    import Quartz
+    ev = Quartz.CGEventCreateScrollWheelEvent(None, Quartz.kCGScrollEventUnitLine, 1, int(amount))
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+
+
 def _osa_str(s: str) -> str:
     """Escape a Python string for safe embedding inside an AppleScript "..." literal.
     Without this, a `"` in an agent-supplied app name / element label breaks out of
@@ -72,15 +131,21 @@ class MacOSBackend(HandsBackend):
     name = "macos"
 
     def capabilities(self) -> dict[str, bool]:
-        has_cliclick = shutil.which("cliclick") is not None
-        has_osa = shutil.which("osascript") is not None
-        has_open = shutil.which("open") is not None
-        has_shot = shutil.which("screencapture") is not None
+        has_cliclick = _which("cliclick") is not None
+        has_osa = _which("osascript") is not None
+        has_open = _which("open") is not None
+        has_shot = _which("screencapture") is not None
+        has_quartz = _quartz_available()
+        # type/press work via cliclick OR the built-in osascript keystroke path;
+        # mouse/scroll via cliclick OR pyobjc-Quartz. So a stock Mac (no cliclick)
+        # still types/keys through osascript.
+        keyboard = has_cliclick or has_osa
+        pointer = has_cliclick or has_quartz
         return {
             "open_app": has_open or has_osa,
             "web_search": has_open, "open_url": has_open,
-            "type_text": has_cliclick, "press_keys": has_cliclick,
-            "mouse_click": has_cliclick, "scroll": has_cliclick,
+            "type_text": keyboard, "press_keys": keyboard,
+            "mouse_click": pointer, "scroll": pointer,
             "click_element": has_osa, "read_screen": has_osa, "list_apps": has_osa,
             "screenshot": has_shot, "run_shell": True,
         }
@@ -110,48 +175,56 @@ class MacOSBackend(HandsBackend):
                        check=True, capture_output=True, timeout=10)
         return f"Searching the web for {query!r}"
 
-    # -- keyboard / mouse (cliclick) -------------------------------------------
+    # -- keyboard / mouse (fallback-chained: cliclick, then built-in osascript) --
 
-    def type_text(self, text: str) -> str:
-        if shutil.which("cliclick") is None:
-            raise UnsupportedTool("cliclick not installed (brew install cliclick)")
-        _cliclick("t:" + text)
-        n = len(text)
-        return f"Typed {n} character{'s' if n != 1 else ''}"
-
-    def press_keys(self, combo: str) -> str:
-        if shutil.which("cliclick") is None:
-            raise UnsupportedTool("cliclick not installed (brew install cliclick)")
-        parts = [p.strip().lower() for p in combo.replace(" ", "").split("+") if p.strip()]
+    def _cliclick_press(self, parts: list[str]) -> None:
         mods = [_MODS[p] for p in parts if p in _MODS]
         keys = [p for p in parts if p not in _MODS]
         if mods:
             _cliclick("kd:" + ",".join(mods))
         try:
             for k in keys:
-                if k in _CLICK_KEYS:
-                    _cliclick("kp:" + _CLICK_KEYS[k])
-                else:
-                    _cliclick("t:" + k)
+                _cliclick("kp:" + _CLICK_KEYS[k] if k in _CLICK_KEYS else "t:" + k)
         finally:
             if mods:
                 _cliclick("ku:" + ",".join(mods))
-        return f"Pressed {combo}"
 
-    def mouse_click(self, x: int, y: int, button: str = "left") -> str:
-        if shutil.which("cliclick") is None:
-            raise UnsupportedTool("cliclick not installed (brew install cliclick)")
-        verb = "rc" if button == "right" else "c"  # right-click / left-click
-        _cliclick(f"{verb}:{int(x)},{int(y)}")
-        return f"{button.capitalize()}-clicked at ({x}, {y})"
-
-    def scroll(self, amount: int) -> str:
-        if shutil.which("cliclick") is None:
-            raise UnsupportedTool("cliclick not installed")
-        # cliclick has no wheel; emulate with repeated arrow keys (best-effort)
+    def _cliclick_scroll(self, amount: int) -> None:
+        # cliclick has no wheel; emulate with repeated arrow keys (best-effort).
         key = "arrow-down" if amount < 0 else "arrow-up"
         for _ in range(min(abs(int(amount)) or 1, 20)):
             _cliclick("kp:" + key)
+
+    def type_text(self, text: str) -> str:
+        run_chain([
+            Mechanism("cliclick", lambda: _which("cliclick"), lambda: _cliclick("t:" + text)),
+            Mechanism("osascript", lambda: _which("osascript"), lambda: _osa_type(text)),
+        ], "type_text")
+        n = len(text)
+        return f"Typed {n} character{'s' if n != 1 else ''}"
+
+    def press_keys(self, combo: str) -> str:
+        parts = [p.strip().lower() for p in combo.replace(" ", "").split("+") if p.strip()]
+        run_chain([
+            Mechanism("cliclick", lambda: _which("cliclick"), lambda: self._cliclick_press(parts)),
+            Mechanism("osascript", lambda: _which("osascript"), lambda: _osa_press(parts)),
+        ], "press_keys")
+        return f"Pressed {combo}"
+
+    def mouse_click(self, x: int, y: int, button: str = "left") -> str:
+        verb = "rc" if button == "right" else "c"  # right-click / left-click
+        run_chain([
+            Mechanism("cliclick", lambda: _which("cliclick"),
+                      lambda: _cliclick(f"{verb}:{int(x)},{int(y)}")),
+            Mechanism("quartz", _quartz_available, lambda: _quartz_click(x, y, button)),
+        ], "mouse_click")
+        return f"{button.capitalize()}-clicked at ({x}, {y})"
+
+    def scroll(self, amount: int) -> str:
+        run_chain([
+            Mechanism("cliclick", lambda: _which("cliclick"), lambda: self._cliclick_scroll(amount)),
+            Mechanism("quartz", _quartz_available, lambda: _quartz_scroll(amount)),
+        ], "scroll")
         return f"Scrolled {'down' if amount < 0 else 'up'} {abs(amount)}"
 
     # -- AT (System Events): read + click --------------------------------------
