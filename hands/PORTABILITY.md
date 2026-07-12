@@ -29,7 +29,7 @@ display. `list_apps`/`read_screen` work anyway (AT-SPI uses the session bus).
 | type_text / press_keys | ydotool (Wayland) / xdotool (X11) | cliclick | SendKeys |
 | mouse_click / scroll | ydotool / xdotool | cliclick | user32 mouse_event |
 | read_screen / click_element | AT-SPI2 | System Events (AXUIElement) | UIAutomation |
-| screenshot | scrot / flameshot | screencapture | .NET CopyFromScreen |
+| screenshot | Screenshot portal / grim / gnome-screenshot / scrot / flameshot | screencapture | .NET CopyFromScreen |
 | run_shell | bash | zsh | powershell |
 
 ## Setup notes per OS
@@ -117,6 +117,30 @@ attachment — point it at the local 5090 model (llama.cpp/vLLM) via
 `WINDYTALK_VISION_URL` (+ `_KEY`, `_MODEL`). Unset = the lane doesn't exist and
 capabilities say so. The model must answer `{"found":true,"x":..,"y":..}` in
 image pixels; off-image answers are rejected, never clamped into a click.
+
+## The capture chain + sense doctrine (GAP_CLOSING_PLAN Phase 3)
+
+Linux `screenshot` is a verified rung chain (`hands/backends/linux.py
+_capture`): each rung must produce a real non-empty file or the chain pivots.
+On **Wayland the org.freedesktop.portal.Screenshot rung goes first** — the
+sanctioned compositor path, no tool binary needed, live-measured FASTER than
+flameshot (0.14s @1080p, 1.03s @4K, silent) — followed by grim (wlroots),
+gnome-screenshot, spectacle, scrot, import, and flameshot raw-stdout as the
+bundled last resort. On **X11 the native grabbers stay first** (proven,
+instant) and the portal slots in just before flameshot.
+
+The portal rung is used only when BOTH the portal is on the bus AND the
+permission store already records the non-sandboxed screenshot grant
+(`_portal_shot_usable` — property/store reads, never UI). A chain rung must
+never pop a first-use dialog; interactive grants belong to the first-run
+wizard (Phase 4). Defense in depth: a portal request that does block on UI is
+Close()d at timeout. The portal writes its own file (~/Pictures/Screenshot-N
+observed live) — the rung copies it to the shots dir and removes the original.
+
+**Sense doctrine:** `read_screen` (AT-SPI, ~0.02s) is the default sense;
+`screenshot` (~0.1–1.4s + vision-model cost downstream) is on demand — for the
+vision spine, for verification, and for anything AT-SPI can't see. The
+contract descriptions (rev.5) state this so the agent chooses cheap-first.
 
 ## Functional capability probes (Phase 0 #2)
 

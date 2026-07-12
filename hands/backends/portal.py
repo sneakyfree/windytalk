@@ -1,5 +1,6 @@
-"""GNOME-Wayland raw-coordinate pointer via org.freedesktop.portal.RemoteDesktop
-(GAP_CLOSING_PLAN Phase 1 #4).
+"""The xdg-desktop-portal backends: the GNOME-Wayland raw-coordinate pointer via
+org.freedesktop.portal.RemoteDesktop (GAP_CLOSING_PLAN Phase 1 #4) and one-shot
+captures via org.freedesktop.portal.Screenshot (Phase 3 #7).
 
 Mutter ignores ydotool's virtual POINTER entirely (proven on 5K and 1080p
 GNOME-Wayland alike — the clicks return success while the cursor never moves).
@@ -59,6 +60,145 @@ class PortalError(RuntimeError):
     """Setup/notify failure — the mechanism chain treats it as a dead prong."""
 
 
+def _do_request(bus, iface: str, method: str, prefix: tuple, signature: str,
+                options: dict, timeout: float, token: str) -> dict:
+    """The portal Request/Response dance (shared by pointer + screenshot).
+    `options` values are (variant_type, value) pairs; returns the response
+    vardict unpacked to plain Python. Raises PortalError on any non-0 code
+    (1 = user cancelled, 2 = other) or timeout. On timeout the Request is
+    Close()d so a dialog a compositor may have popped doesn't linger."""
+    from gi.repository import Gio, GLib
+    sender = (bus.get_unique_name() or ":0.0")[1:].replace(".", "_")
+    req_path = f"/org/freedesktop/portal/desktop/request/{sender}/{token}"
+
+    result: dict = {}
+    loop = GLib.MainLoop()
+
+    def on_response(_c, _s, _p, _i, _m, params):
+        code, vardict = params.unpack()
+        result["code"], result["res"] = code, vardict
+        loop.quit()
+
+    sub = bus.signal_subscribe(_PORTAL_BUS, "org.freedesktop.portal.Request",
+                               "Response", req_path, None,
+                               Gio.DBusSignalFlags.NONE, on_response)
+    try:
+        opts = {k: GLib.Variant(t, v) for k, (t, v) in options.items()}
+        opts["handle_token"] = GLib.Variant("s", token)
+        reply = bus.call_sync(
+            _PORTAL_BUS, _PORTAL_PATH, f"org.freedesktop.portal.{iface}", method,
+            GLib.Variant(signature, (*prefix, opts)),
+            GLib.VariantType("(o)"), Gio.DBusCallFlags.NONE, 5000, None)
+        (actual_path,) = reply.unpack()
+        if actual_path != req_path:
+            # pre-0.9 portals ignore handle_token; re-subscribe to the real
+            # path (documented race accepted — the fleet runs modern portals).
+            bus.signal_unsubscribe(sub)
+            req_path = actual_path
+            sub = bus.signal_subscribe(_PORTAL_BUS, "org.freedesktop.portal.Request",
+                                       "Response", actual_path, None,
+                                       Gio.DBusSignalFlags.NONE, on_response)
+        timer = GLib.timeout_add(int(timeout * 1000),
+                                 lambda: (result.setdefault("code", -1), loop.quit()) and False)
+        loop.run()
+        if "res" in result:  # response won the race; the one-shot timer is still pending
+            GLib.source_remove(timer)
+        elif result.get("code") == -1:
+            try:  # dismiss whatever UI the request may be blocked on
+                bus.call_sync(_PORTAL_BUS, req_path, "org.freedesktop.portal.Request",
+                              "Close", None, None, Gio.DBusCallFlags.NONE, 2000, None)
+            except Exception:  # noqa: BLE001 — Close is best-effort hygiene
+                pass
+    finally:
+        bus.signal_unsubscribe(sub)
+    if result.get("code") != 0:
+        raise PortalError(f"{iface}.{method} response code {result.get('code')}"
+                          + (" (timeout)" if result.get("code") == -1 else ""))
+    return result.get("res") or {}
+
+
+class PortalScreenshot:
+    """One-shot captures via org.freedesktop.portal.Screenshot (Phase 3 #7) —
+    the sanctioned GNOME-Wayland screenshot. Live-measured (2026-07-12):
+    silent non-interactive success in 0.14s (OC3 GNOME 46 @1080p) / 1.03s
+    (Windy 0 GNOME 50 @4K) — faster than flameshot's ~1.4s — with the
+    permission store's non-sandboxed entry ('') granting 'yes' on both.
+
+    Non-interactive ONLY: interactive first-grants belong to the wizard
+    (Phase 4). capture() is attempted only when the permission store says the
+    grant exists, so the capture chain never pops UI on a fresh box; _do_request
+    Close()s on timeout as a second line of defense."""
+
+    _counter = 0
+
+    @staticmethod
+    def available() -> bool:
+        """Is the Screenshot portal on the session bus? A real property read —
+        never a request, never UI."""
+        try:
+            from gi.repository import Gio, GLib
+            bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+            reply = bus.call_sync(
+                _PORTAL_BUS, _PORTAL_PATH, "org.freedesktop.DBus.Properties", "Get",
+                GLib.Variant("(ss)", ("org.freedesktop.portal.Screenshot", "version")),
+                GLib.VariantType("(v)"), Gio.DBusCallFlags.NONE, 3000, None)
+            return int(reply.unpack()[0]) >= 1
+        except Exception:  # noqa: BLE001 — no portal / no bus / no gi ⇒ not available
+            return False
+
+    @staticmethod
+    def permission_granted() -> bool:
+        """Does the permission store record a screenshot grant for non-sandboxed
+        apps (app id '')? False on 'no'/absent/unreadable — the chain then skips
+        the portal rung rather than risk a first-use dialog outside the wizard."""
+        try:
+            from gi.repository import Gio, GLib
+            bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+            reply = bus.call_sync(
+                "org.freedesktop.impl.portal.PermissionStore",
+                "/org/freedesktop/impl/portal/PermissionStore",
+                "org.freedesktop.impl.portal.PermissionStore", "Lookup",
+                GLib.Variant("(ss)", ("screenshot", "screenshot")),
+                None, Gio.DBusCallFlags.NONE, 3000, None)
+            perms, _data = reply.unpack()
+            return "yes" in (perms.get("") or [])
+        except Exception:  # noqa: BLE001 — no store / no table yet ⇒ not granted
+            return False
+
+    # seam for tests --------------------------------------------------------------
+
+    def _request(self, options: dict, timeout: float) -> dict:
+        from gi.repository import Gio
+        PortalScreenshot._counter += 1
+        token = f"windytalk_shot_{os.getpid()}_{PortalScreenshot._counter}"
+        bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        return _do_request(bus, "Screenshot", "Screenshot", ("",), "(sa{sv})",
+                           options, timeout, token)
+
+    def capture(self, dest: str) -> bool:
+        """Full-screen capture into `dest`. The portal writes its own file
+        (~/Pictures/Screenshot-N.png observed live) — copy it to `dest` and
+        remove the original so captures don't litter the user's Pictures.
+        False on ANY failure: the chain pivots to the next rung."""
+        try:
+            res = self._request({"interactive": ("b", False)}, timeout=8.0)
+            uri = str(res.get("uri") or "")
+            if not uri.startswith("file://"):
+                return False
+            src = Path(uri[7:])
+            data = src.read_bytes()
+            if not data:
+                return False
+            Path(dest).write_bytes(data)
+            try:
+                src.unlink()
+            except OSError:
+                pass  # litter is not failure
+            return True
+        except Exception:  # noqa: BLE001 — dead rung, chain moves on
+            return False
+
+
 class PortalPointer:
     """One remembered RemoteDesktop session; move/click/scroll against it."""
 
@@ -99,54 +239,12 @@ class PortalPointer:
 
     def _request(self, iface: str, method: str, prefix: tuple, signature: str,
                  options: dict, timeout: float = 8.0) -> dict:
-        """Call a portal request method and wait for its Response signal.
-        `options` values are (variant_type, value) pairs; returns the response
-        vardict unpacked to plain Python. Raises PortalError on any non-0 code
-        (1 = user cancelled, 2 = other) or timeout."""
-        from gi.repository import Gio, GLib
-        bus = self._get_bus()
+        """The shared Request/Response dance against this pointer's bus (see
+        _do_request). Kept as a method — it is the test seam fakes override."""
         self._counter += 1
         token = f"windytalk_{os.getpid()}_{self._counter}"
-        sender = (bus.get_unique_name() or ":0.0")[1:].replace(".", "_")
-        req_path = f"/org/freedesktop/portal/desktop/request/{sender}/{token}"
-
-        result: dict = {}
-        loop = GLib.MainLoop()
-
-        def on_response(_c, _s, _p, _i, _m, params):
-            code, vardict = params.unpack()
-            result["code"], result["res"] = code, vardict
-            loop.quit()
-
-        sub = bus.signal_subscribe(_PORTAL_BUS, "org.freedesktop.portal.Request",
-                                   "Response", req_path, None,
-                                   Gio.DBusSignalFlags.NONE, on_response)
-        try:
-            opts = {k: GLib.Variant(t, v) for k, (t, v) in options.items()}
-            opts["handle_token"] = GLib.Variant("s", token)
-            reply = bus.call_sync(
-                _PORTAL_BUS, _PORTAL_PATH, f"org.freedesktop.portal.{iface}", method,
-                GLib.Variant(signature, (*prefix, opts)),
-                GLib.VariantType("(o)"), Gio.DBusCallFlags.NONE, 5000, None)
-            (actual_path,) = reply.unpack()
-            if actual_path != req_path:
-                # pre-0.9 portals ignore handle_token; re-subscribe to the real
-                # path (documented race accepted — the fleet runs modern portals).
-                bus.signal_unsubscribe(sub)
-                sub = bus.signal_subscribe(_PORTAL_BUS, "org.freedesktop.portal.Request",
-                                           "Response", actual_path, None,
-                                           Gio.DBusSignalFlags.NONE, on_response)
-            timer = GLib.timeout_add(int(timeout * 1000),
-                                     lambda: (result.setdefault("code", -1), loop.quit()) and False)
-            loop.run()
-            if "res" in result:  # response won the race; the one-shot timer is still pending
-                GLib.source_remove(timer)
-        finally:
-            bus.signal_unsubscribe(sub)
-        if result.get("code") != 0:
-            raise PortalError(f"{iface}.{method} response code {result.get('code')}"
-                              + (" (timeout)" if result.get("code") == -1 else ""))
-        return result.get("res") or {}
+        return _do_request(self._get_bus(), iface, method, prefix, signature,
+                           options, timeout, token)
 
     def _notify(self, method: str, signature: str, args: tuple) -> None:
         """Plain (non-request) RemoteDesktop call — the NotifyPointer* family."""
