@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://windytalk.com/contracts/telemetry.v1.json",
-  "$comment": "telemetry.v1 \u2014 FROZEN 2026-07-09. Schema for the body of POST https://admin.windyword.ai/v1/events (per-emitter bearer token). Field names match the LIVE ingest as probed in docs/PROBE_RESULTS.md and re-probed during Task 0.4 (the ingest requires service/event_type/actor_type AND ts \u2014 the ts requirement surfaced only when a ts-less event 422'd on 2026-07-09; the genome's earlier sketch's 'event' field is event_type here). CONTENT-FREE BY CONSTRUCTION: additionalProperties:false everywhere and no free-text fields \u2014 ids, enums, timestamps, and numbers only. A payload carrying 'transcript', 'message', or any other unlisted key is schema-invalid (the live ingest 422s the same way). Emitted fire-and-forget by telemetry/emit.py (ADR-WA-001): async, \u2264200ms, swallows all errors, no-op unless configured. Change control per contracts/README.md. ADDITIVE v1.1 (2026-07-11): event_type 'control.action' + optional non-content fields 'ok' (boolean) and 'mode' (closed enum), required by control.mcp.v1's telemetry block ({tool, ok, error?, mode}); the frozen v1 vocabulary predates the control surface.",
+  "$comment": "telemetry.v1 \u2014 FROZEN 2026-07-09. Schema for the body of POST https://admin.windyword.ai/v1/events (per-emitter bearer token). Field names match the LIVE ingest as probed in docs/PROBE_RESULTS.md and re-probed during Task 0.4 (the ingest requires service/event_type/actor_type AND ts \u2014 the ts requirement surfaced only when a ts-less event 422'd on 2026-07-09; the genome's earlier sketch's 'event' field is event_type here). CONTENT-FREE BY CONSTRUCTION: additionalProperties:false everywhere and no free-text fields \u2014 ids, enums, timestamps, and numbers only. A payload carrying 'transcript', 'message', or any other unlisted key is schema-invalid (the live ingest 422s the same way). Emitted fire-and-forget by telemetry/emit.py (ADR-WA-001): async, \u2264200ms, swallows all errors, no-op unless configured. Change control per contracts/README.md. ADDITIVE v1.1 (2026-07-11): event_type 'control.action' + optional non-content fields 'ok' (boolean) and 'mode' (closed enum), required by control.mcp.v1's telemetry block ({tool, ok, error?, mode}); the frozen v1 vocabulary predates the control surface. ADDITIVE v1.2 (2026-07-12): event_type 'update.rolled_back' (the out-of-process watcher's staged-rollout tripwire — an update that failed to attest and was rolled back) + 'tool' enum widened with the 24 control.mcp.v1 tool names: control.action events were schema-INVALID here while the LIVE ingest accepted them (re-probed 2026-07-12, 202 for tool:'enter_safe_mode'); the schema now agrees with both the ingest and control.mcp.v1's telemetry block.",
   "title": "Windy Talk telemetry event batch",
   "type": "object",
   "properties": {
@@ -46,7 +46,8 @@
             "engine.error",
             "client.error",
             "probe.task00",
-            "control.action"
+            "control.action",
+            "update.rolled_back"
           ]
         },
         "actor_type": {
@@ -117,7 +118,7 @@
         },
         "tool": {
           "type": "string",
-          "$comment": "hands.mcp.v1 tool name for tool.invoked events \u2014 the name only, never args.",
+          "$comment": "hands.mcp.v1 tool name for tool.invoked events, or (additive v1.2) the control.mcp.v1 tool name for control.action events \u2014 the name only, never args. Coverage of BOTH contracts is drift-tested (tests/test_contracts.py).",
           "enum": [
             "open_app",
             "web_search",
@@ -130,7 +131,31 @@
             "read_screen",
             "list_apps",
             "screenshot",
-            "run_shell"
+            "run_shell",
+            "get_health",
+            "get_status",
+            "get_config",
+            "get_logs",
+            "list_audio_devices",
+            "run_selftest",
+            "get_capabilities",
+            "check_for_update",
+            "reconnect",
+            "enter_safe_mode",
+            "exit_safe_mode",
+            "repair_resurrection",
+            "restart_engine",
+            "restart_app",
+            "clear_cache",
+            "set_audio_input",
+            "set_audio_output",
+            "set_volume",
+            "set_engine_url",
+            "set_brain",
+            "set_wake_mode",
+            "set_autonomy",
+            "reset_to_defaults",
+            "apply_update"
           ]
         },
         "tier_outcome": {

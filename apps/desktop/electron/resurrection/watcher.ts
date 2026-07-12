@@ -38,6 +38,7 @@ import {
   WATCH_INTERVAL_MS,
 } from "../control/constants.js";
 import { readHeartbeat } from "../control/heartbeat.js";
+import { makeEmitter } from "../control/emit.js";
 import {
   clearUpdateState,
   readUpdateState,
@@ -90,6 +91,8 @@ export interface WatcherDeps {
   updateAttested?: (state: UpdateState) => boolean;
   /** Flip the A/B pointer back to previousBinary and clear the marker. */
   rollbackUpdate?: (state: UpdateState) => void;
+  /** Content-free staged-rollout tripwire (telemetry v1.2 update.rolled_back). */
+  emitRollback?: (state: UpdateState) => void;
   clearUpdate?: () => void;
   log?: (msg: string) => void;
 }
@@ -118,6 +121,7 @@ export async function checkOnce(deps: WatcherDeps): Promise<WatchAction> {
     } else if (decision === "rollback") {
       log(`update to ${update.toVersion} failed to attest in 60 s — rolling back to ${update.fromVersion}`);
       deps.rollbackUpdate?.(update);
+      deps.emitRollback?.(update);
       (deps.notify ?? notifyOs)(
         "Windy Talk restored a working version",
         "A recent update didn't start correctly, so Windy Talk went back to the version that works.",
@@ -388,6 +392,17 @@ export async function runWatcherCli(argv: string[]): Promise<void> {
       relaunchFromSpec(paths.resurrectionSpec, log);
     },
     clearUpdate: () => clearUpdateState(paths.stateDir),
+    emitRollback: (st) => {
+      // The fleet-visible rollback signal a staged rollout watches for —
+      // content-free (a version identifier and a fixed code, nothing else),
+      // fire-and-forget, inert without the telemetry token. Emitted from the
+      // WATCHER so a hostile/broken new build cannot suppress it.
+      makeEmitter()({
+        event_type: "update.rolled_back",
+        error_code: "rollback_deadline",
+        metadata: { app_version: st.toVersion },
+      });
+    },
     log,
   };
   if (argv.includes("--loop")) {

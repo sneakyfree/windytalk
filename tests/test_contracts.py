@@ -119,3 +119,35 @@ def test_required_ingest_trio_enforced():
 def test_empty_batch_rejected():
     with pytest.raises(ValidationError):
         validate({"events": []}, telemetry_schema())
+
+
+# ---------- cross-contract drift (telemetry v1.2) ----------
+
+def test_telemetry_tool_enum_covers_both_tool_contracts():
+    """Every tool name in hands.mcp.v1 AND control.mcp.v1 must be a legal
+    telemetry 'tool' value — else that tool's events are schema-invalid and a
+    new tool silently vanishes from the dashboard. Additive-growth tripwire."""
+    tool_enum = set(
+        load("telemetry.v1.json")["$defs"]["event"]["properties"]["tool"]["enum"])
+    hands = {t["name"] for t in load("hands.mcp.v1.json")["tools"]}
+    control = {t["name"] for t in load("control.mcp.v1.json")["tools"]}
+    assert hands <= tool_enum, f"hands tools missing: {sorted(hands - tool_enum)}"
+    assert control <= tool_enum, f"control tools missing: {sorted(control - tool_enum)}"
+
+
+def test_control_action_and_rollback_events_validate():
+    """The exact shapes emit.ts (control.action) and the watcher
+    (update.rolled_back) produce must validate against telemetry v1.2."""
+    control_action = {
+        "service": "windytalk", "platform": "windy-talk",
+        "event_type": "control.action", "actor_type": "system",
+        "session_id": "none", "ts": "2026-07-12T00:00:00Z",
+        "tool": "enter_safe_mode", "ok": True, "mode": "normal",
+    }
+    rolled_back = {
+        "service": "windytalk", "platform": "windy-talk",
+        "event_type": "update.rolled_back", "actor_type": "system",
+        "session_id": "none", "ts": "2026-07-12T00:00:00Z",
+        "error_code": "rollback_deadline", "metadata": {"app_version": "1.1.0"},
+    }
+    validate({"events": [control_action, rolled_back]}, telemetry_schema())
