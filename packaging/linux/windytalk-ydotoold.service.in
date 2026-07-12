@@ -1,0 +1,23 @@
+# Windy Talk bundled ydotoold — the uinput daemon that gives ydotool a virtual
+# keyboard/mouse on GNOME/KDE Wayland (and everywhere else). Runs as a SYSTEM
+# service on purpose: root opens /dev/uinput reliably, and the socket lives in
+# /run/windytalk (created at boot via RuntimeDirectory) so it works whether or
+# not anyone is logged in — unlike /run/user/<uid>, which only exists after
+# login. A user-level service also hits uinput EPERM until a full re-login
+# refreshes group membership (validated on a real box, OC3 2026-07-11).
+#
+# @TOKENS@ are rendered by firstrun-linux.sh.
+[Unit]
+Description=Windy Talk input daemon (bundled ydotoold)
+Documentation=https://github.com/ReimuNotMoe/ydotool
+
+[Service]
+Type=simple
+ExecStart=@YDOTOOLD_BIN@ --socket-path=/run/windytalk/.ydotool_socket --socket-own=@OWN_UID@:@OWN_GID@ --socket-perm=0600
+RuntimeDirectory=windytalk
+RuntimeDirectoryMode=0755
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
