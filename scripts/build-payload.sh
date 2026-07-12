@@ -84,18 +84,37 @@ for a in json.load(sys.stdin)['assets']:
   tar -xzf "$tmp" -C "$out" # extracts python/
 }
 
-# unpack_wheels <platform-tag> <site-packages-dir> — cross-OS pip via wheel unzip
+# unpack_wheels <platform-tag> <site-packages-dir> [pkgs…] — cross-OS pip via
+# wheel unzip; defaults to the core cocktail packages.
 unpack_wheels() {
   local plat="$1" site="$2" wdir
+  shift 2
+  local pkgs=("$@")
+  [ ${#pkgs[@]} -gt 0 ] || pkgs=("${CORE_PKGS[@]}")
   wdir="$(mktemp -d)"
   python3 -m pip download --quiet --disable-pip-version-check \
     --only-binary=:all: --platform "$plat" --python-version 3.12 \
-    --implementation cp -d "$wdir" "${CORE_PKGS[@]}" \
+    --implementation cp -d "$wdir" "${pkgs[@]}" \
     || die "wheel download failed for $plat"
   mkdir -p "$site"
   local w
   for w in "$wdir"/*.whl; do unzip -qo "$w" -d "$site"; done
   rm -rf "$wdir"
+}
+
+# fetch_pinned <lockfile> <default-url> <out-file> — sha-pinned single-file fetch
+fetch_pinned() {
+  local lock="$1" url_default="$2" out="$3" url sha
+  if [ ! -f "$lock" ]; then
+    curl -fsSL --retry 3 -o "$out" "$url_default"
+    printf 'url=%s\nsha256=%s\n' "$url_default" "$(sha256sum "$out" | cut -d' ' -f1)" > "$lock"
+    echo "PINNED: $url_default"
+  else
+    url="$(grep '^url=' "$lock" | cut -d= -f2-)"
+    sha="$(grep '^sha256=' "$lock" | cut -d= -f2-)"
+    curl -fsSL --retry 3 -o "$out" "$url"
+    echo "$sha  $out" | sha256sum -c - >/dev/null || die "sha256 mismatch vs $lock"
+  fi
 }
 
 rm -rf "$DEST"
@@ -122,8 +141,19 @@ case "$OS" in
       "aarch64-apple-darwin-install_only.tar.gz" "$DEST/.arm64"
     mv "$DEST/.x64/python" "$DEST/python-x64" && rmdir "$DEST/.x64"
     mv "$DEST/.arm64/python" "$DEST/python-arm64" && rmdir "$DEST/.arm64"
-    unpack_wheels macosx_10_13_x86_64 "$DEST/python-x64/lib/python3.12/site-packages"
-    unpack_wheels macosx_11_0_arm64 "$DEST/python-arm64/lib/python3.12/site-packages"
+    # core + the native mouse prong (pyobjc ships universal2 wheels)
+    unpack_wheels macosx_10_13_x86_64 "$DEST/python-x64/lib/python3.12/site-packages" \
+      "${CORE_PKGS[@]}" pyobjc-framework-Quartz
+    unpack_wheels macosx_11_0_arm64 "$DEST/python-arm64/lib/python3.12/site-packages" \
+      "${CORE_PKGS[@]}" pyobjc-framework-Quartz
+    # cliclick: upstream releases a true universal (x86_64+arm64) binary
+    mkdir -p "$DEST/tools"
+    fetch_pinned packaging/cliclick.lock \
+      "https://github.com/BlueM/cliclick/releases/download/5.1/cliclick.zip" \
+      /tmp/cliclick.zip
+    unzip -qo -j /tmp/cliclick.zip "cliclick/cliclick" -d "$DEST/tools"
+    chmod 0755 "$DEST/tools/cliclick"
+    PACKED_TOOLS+=(cliclick)
     ;;
 esac
 
