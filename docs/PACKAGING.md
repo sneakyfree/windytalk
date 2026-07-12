@@ -49,10 +49,18 @@ product forever.
 
 ## Update doctrine (v1.x)
 
-- **Notification channel = the app itself.** On launch + daily, fetch a tiny
-  **signed** `latest.json` manifest; if newer, show an in-app banner with the
-  fix list and a one-click install. (`check_for_update` / `apply_update` in
-  control.mcp.v1 are already built; inert until the Ed25519 key is embedded.)
+- **Notification channel = the app itself, over the contract-pinned channel.**
+  The frozen contract (self_update.source) pins the update channel to **GitHub
+  Releases of this repo** — channel-head = newest non-prerelease Release. On
+  launch + daily the app calls `check_for_update` (reads the head, installs
+  nothing); if newer, an in-app banner offers a one-click install. Every
+  artifact ships with a detached Ed25519 `.sig` asset, verified against the
+  embedded public key before staging. Publish with
+  `scripts/publish-release.sh` (signs, self-verifies, enforces the artifact
+  naming rule `windytalk-<v>-{win-x64.exe|mac-universal.dmg|linux-x86_64.AppImage}`);
+  generate the trust root once with `scripts/gen-update-key.sh`. Inert until
+  the public key lands in `update-key.ts`. R2 hosts big first-install
+  downloads for NEW users; it is not the update channel.
 - **Atomic whole-replace, never patch-in-place.** Download the complete new
   version to a staging dir, verify signature + checksum, swap the entire app
   directory in one move. Old code is 100% eradicated — mixed-version "fighting"
