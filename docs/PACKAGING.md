@@ -79,12 +79,16 @@ product forever.
 
 ## Telemetry (content-free, from the first release)
 
-Events carry: app version, OS + version, system locale, anonymous install id,
-error **codes** (never content — no words, no audio, ever), crash/recovery
-counters, and which fallback mechanism served each action. That is exactly
-enough to see "error X spiking among es-MX users on Ubuntu 22.04" and to watch
-it fall to zero after the fix ships. Collector: a small Cloudflare Worker
-(spec in a later slice).
+Events carry: app version, OS, locale, anonymous install id, error **codes**
+(never content — no words, no audio, ever), tool names, and supervisor mode.
+That is exactly enough to see "error X spiking among es-MX users on Ubuntu"
+and to watch it fall to zero after the fix ships. The collector ALREADY
+EXISTS: the ecosystem ingest at `admin.windyword.ai/v1/events` (contract
+`telemetry.v1.json`, per-emitter bearer token — the WINDY_TALK token is
+minted; `WINDYTALK_TELEMETRY_TOKEN` is baked into release builds at package
+time, absent = fully inert). Staged-rollout monitoring = `session.start`
+version-adoption curves + the `update.rolled_back` tripwire the
+out-of-process watcher emits when a new build fails to attest.
 
 ## Per-OS first-run notes
 

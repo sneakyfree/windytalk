@@ -221,3 +221,39 @@ test("45s budget: worst case (heartbeat bumped at T0, SIGKILL at T0, ticks every
   const h = harness({ ageS: 30, live: DEAD });
   assert.equal(await checkOnce(h.deps), "healthy");
 });
+
+// -- P3: the out-of-process staged-rollout tripwire (telemetry v1.2) ----------------
+
+test("failed update: rollback branch fires BOTH the pointer-flip and the tripwire", async () => {
+  const h = harness({ ageS: 5 });
+  const rolled: string[] = [];
+  const emitted: string[] = [];
+  h.deps.loadUpdateState = () => ({
+    pending: true, fromVersion: "1.0.0", toVersion: "1.1.0",
+    previousBinary: "/x/app-1.0.0", newBinary: "/x/app-1.1.0",
+    deadlineMs: 9_999_999_999, // < harness now (10_000_000_000): deadline passed
+  });
+  h.deps.updateAttested = () => false;
+  h.deps.rollbackUpdate = (st) => { rolled.push(st.toVersion); };
+  h.deps.emitRollback = (st) => { emitted.push(st.toVersion); };
+  assert.equal(await checkOnce(h.deps), "kill-relaunch");
+  assert.deepEqual(rolled, ["1.1.0"]);
+  assert.deepEqual(emitted, ["1.1.0"]); // the fleet-visible rollback signal
+});
+
+test("healthy update commit: tripwire does NOT fire (rollback-only signal)", async () => {
+  const h = harness({ ageS: 5 });
+  const emitted: string[] = [];
+  let cleared = 0;
+  h.deps.loadUpdateState = () => ({
+    pending: true, fromVersion: "1.0.0", toVersion: "1.1.0",
+    previousBinary: "/x/app-1.0.0", newBinary: "/x/app-1.1.0",
+    deadlineMs: 10_000_060_000,
+  });
+  h.deps.updateAttested = () => true;
+  h.deps.emitRollback = (st) => { emitted.push(st.toVersion); };
+  h.deps.clearUpdate = () => { cleared++; };
+  assert.equal(await checkOnce(h.deps), "healthy");
+  assert.equal(cleared, 1);
+  assert.deepEqual(emitted, []);
+});
