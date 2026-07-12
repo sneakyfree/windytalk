@@ -18,7 +18,7 @@ from pathlib import Path
 from threading import Thread
 
 from .backends import get_backend
-from .backends.base import TOOL_NAMES, UnsupportedTool
+from .backends.base import TOOL_NAMES, GuardRefused, UnsupportedTool
 from .tiers import TierPolicy
 
 _CONTRACT = Path(__file__).resolve().parent.parent / "contracts" / "hands.mcp.v1.json"
@@ -71,6 +71,11 @@ class HandsSurface:
             return {"ok": True, "result": result}
         except UnsupportedTool:
             return {"ok": False, "error": "unsupported"}
+        except GuardRefused as e:
+            # The focus-guard declined to inject keystrokes (nothing was typed).
+            # A stable prefix so agents can distinguish "refused for safety" from
+            # a tier denial or a mechanical failure.
+            return {"ok": False, "error": f"refused: {e}"}
         except Exception as e:
             return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 

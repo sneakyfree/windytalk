@@ -17,7 +17,7 @@ import subprocess
 from pathlib import Path
 from urllib.parse import quote_plus
 
-from .base import HandsBackend, Mechanism, UnsupportedTool, run_chain
+from .base import FocusInfo, HandsBackend, Mechanism, UnsupportedTool, focus_guard, run_chain
 
 
 def _ydotool_socket() -> str:
@@ -137,30 +137,88 @@ def _atspi():
     return Atspi
 
 
+# -- functional capability probes (Phase 0 #2) --------------------------------
+# Presence lied on real machines: grim installed on GNOME but the compositor
+# refuses it; gi importable but the accessibility bus can be dead (GNOME needs
+# toolkit-accessibility=true). One real probe each, cached per backend instance.
+
+def _atspi_probe() -> bool:
+    """A real AT-SPI round-trip (init + desktop query), not 'is gi importable'."""
+    try:
+        A = _atspi()
+        A.get_desktop(0).get_child_count()
+        return True
+    except Exception:  # noqa: BLE001 — any failure means the sense is not functional
+        return False
+
+
+def _screenshot_probe() -> bool:
+    """One real throwaway capture through the same chain screenshot() uses —
+    the only honest answer to 'can this box screenshot'. The probe file never
+    leaves a temp dir."""
+    import tempfile
+    try:
+        with tempfile.TemporaryDirectory(prefix="windytalk-probe-") as td:
+            return _capture(str(Path(td) / "probe.png")) is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _capture(dest: str) -> str | None:
+    """Session-AGNOSTIC capture chain: try every tool present, in a broad order
+    that covers Wayland (grim), GNOME (gnome-screenshot, both sessions), KDE
+    (spectacle), and X11 (scrot/import), with flameshot raw-stdout as the last
+    rung. Each is verified by a real non-empty file before we accept it, so a
+    tool that runs on the wrong session (writes nothing) transparently pivots to
+    the next. Returns the name of the tool that seated, or None."""
+    for cmd in (["grim", dest],
+                ["gnome-screenshot", "-f", dest],
+                ["spectacle", "-b", "-n", "-o", dest],
+                ["scrot", "-o", dest],
+                ["import", "-window", "root", dest]):
+        if not _which(cmd[0]):
+            continue
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, timeout=15)
+            if Path(dest).exists() and Path(dest).stat().st_size > 0:
+                return cmd[0]
+        except Exception:  # noqa: BLE001 — a failed rung -> try the next
+            pass
+    if _which("flameshot"):  # last resort: raw bytes to stdout
+        try:
+            data = subprocess.run(["flameshot", "full", "--raw"],
+                                  capture_output=True, timeout=15).stdout
+            if data:
+                Path(dest).write_bytes(data)
+                return "flameshot"
+        except Exception:  # noqa: BLE001
+            pass
+    return None
+
+
 class LinuxBackend(HandsBackend):
     name = "linux"
 
     def capabilities(self) -> dict[str, bool]:
-        # Honest per-tool probe: report what this box can actually do, so the agent
+        # Honest per-tool report: what this box can actually DO, so the agent
         # gets a graceful `unsupported` instead of a raw exception (PORTABILITY.md /
         # GET /capabilities promise this reflects reality, not an assumption).
+        # AT-SPI and screenshot are FUNCTION-probed (once, cached) — binary
+        # presence proved dishonest live: grim present on GNOME but refused by
+        # the compositor; gi importable with the accessibility bus dead.
         input_ok = _which("xdotool") is not None or _which("wtype") is not None or _ydotool_available()
-        has_atspi = False
-        try:  # AT-SPI drives read/click; absent gi means blind
-            import gi  # noqa: F401
-            has_atspi = True
-        except Exception:
-            has_atspi = False
-        has_shot = any(_which(c) for c in
-                       ("grim", "gnome-screenshot", "spectacle", "scrot", "import", "flameshot"))
+        atspi_ok = self._probed("atspi", _atspi_probe)
+        shot_ok = self._probed("screenshot", _screenshot_probe)
         has_launch = shutil.which("gtk-launch") is not None
         has_xdg = shutil.which("xdg-open") is not None
         return {
             "open_app": has_launch or has_xdg, "open_url": has_xdg, "web_search": has_xdg,
-            "type_text": input_ok, "press_keys": input_ok,
+            # type_text needs AT-SPI too: the focus-guard fails closed when it
+            # can't resolve where keystrokes would land (unverifiable = unsafe).
+            "type_text": input_ok and atspi_ok, "press_keys": input_ok,
             "mouse_click": input_ok, "scroll": input_ok,
-            "click_element": has_atspi and input_ok, "read_screen": has_atspi,
-            "list_apps": has_atspi, "screenshot": has_shot, "run_shell": True,
+            "click_element": atspi_ok and input_ok, "read_screen": atspi_ok,
+            "list_apps": atspi_ok, "screenshot": shot_ok, "run_shell": True,
         }
 
     # -- keyboard / mouse (fallback-chained: try every prong before giving up) --
@@ -244,10 +302,13 @@ class LinuxBackend(HandsBackend):
         }
         return [builders[k] for k in _input_order() if k in builders]
 
-    def type_text(self, text: str) -> str:
+    def type_text(self, text: str, target: str | None = None) -> str:
+        # Focus-guard BEFORE any keystroke leaves (Phase 0 #1): resolve where the
+        # keys would actually land, refuse terminals/unknown/mismatched targets.
+        where = focus_guard(self._focused_window(), target)
         run_chain(self._type_mechs(text), "type_text")  # raises UnsupportedTool if all fail
         n = len(text)
-        return f"Typed {n} character{'s' if n != 1 else ''}"
+        return f"Typed {n} character{'s' if n != 1 else ''} into {where}"
 
     def press_keys(self, combo: str) -> str:
         run_chain(self._key_mechs(combo), "press_keys")
@@ -335,6 +396,56 @@ class LinuxBackend(HandsBackend):
             except Exception:
                 continue
         return best
+
+    def _focused_window(self) -> FocusInfo | None:
+        """Resolve where keystrokes would ACTUALLY land, for the type_text
+        focus-guard. Unlike _active_app there is NO best-guess fallback — the
+        guard needs certainty, and 'no frame claims ACTIVE' honestly means
+        'unresolvable' (the guard then refuses rather than typing blind)."""
+        try:
+            A = _atspi()
+            desk = A.get_desktop(0)
+            actives = []
+            for i in range(desk.get_child_count()):
+                try:
+                    app = desk.get_child_at_index(i)
+                    for j in range(app.get_child_count()):
+                        frame = app.get_child_at_index(j)
+                        if frame.get_state_set().contains(A.StateType.ACTIVE):
+                            actives.append((app, frame))
+                except Exception:
+                    continue
+            if not actives:
+                return None
+            # Shell chrome (gnome-shell etc.) can hold an ACTIVE frame alongside
+            # the real app's — prefer the real app when both claim it. (When ONLY
+            # gnome-shell is active — the overview search — that IS the focus,
+            # and typing there is legitimate.)
+            shell = ("gnome-shell", "mutter-x11-frames", "ibus-extension-gtk3")
+            actives.sort(key=lambda af: (af[0].get_name() or "").lower() in shell)
+            app, frame = actives[0]
+            return FocusInfo(app=app.get_name() or None, title=frame.get_name() or None,
+                             role=self._focused_role(A, frame))
+        except Exception:
+            return None
+
+    def _focused_role(self, A, frame, budget: int = 400, max_depth: int = 15):
+        """Accessibility role of the FOCUSED element inside the active frame
+        (bounded walk). This is what catches a terminal PANE inside an app that
+        isn't itself a terminal (VTE widgets expose role 'terminal')."""
+        stack = [(frame, 0)]
+        while stack and budget > 0:
+            node, depth = stack.pop()
+            budget -= 1
+            try:
+                if node.get_state_set().contains(A.StateType.FOCUSED):
+                    return node.get_role_name()
+                if depth < max_depth:
+                    for i in range(min(node.get_child_count(), 100)):
+                        stack.append((node.get_child_at_index(i), depth + 1))
+            except Exception:
+                continue
+        return None
 
     def _collect_text(self, node, A, out, budget, depth=0, limit=200):
         if len(out) >= limit or depth > 30 or budget[0] <= 0:
@@ -439,33 +550,8 @@ class LinuxBackend(HandsBackend):
         if not name.lower().endswith(".png"):
             name += ".png"
         path = str(shots_dir / name)
-        # Session-AGNOSTIC chain: try every capture tool present, in a broad
-        # order that covers Wayland (grim), GNOME (gnome-screenshot, both
-        # sessions), KDE (spectacle), and X11 (scrot/import). Each is verified by
-        # a real non-empty file before we accept it, so a tool that runs on the
-        # wrong session (writes nothing) transparently pivots to the next.
-        for cmd in (["grim", path],
-                    ["gnome-screenshot", "-f", path],
-                    ["spectacle", "-b", "-n", "-o", path],
-                    ["scrot", "-o", path],
-                    ["import", "-window", "root", path]):
-            if not _which(cmd[0]):
-                continue
-            try:
-                subprocess.run(cmd, check=True, capture_output=True, timeout=15)
-                if Path(path).exists() and Path(path).stat().st_size > 0:
-                    return f"Saved screenshot to {path}"
-            except Exception:
-                pass
-        if _which("flameshot"):  # last resort: raw bytes to stdout
-            try:
-                data = subprocess.run(["flameshot", "full", "--raw"],
-                                      capture_output=True, timeout=15).stdout
-                if data:
-                    Path(path).write_bytes(data)
-                    return f"Saved screenshot to {path}"
-            except Exception:
-                pass
+        if _capture(path) is not None:  # the shared session-agnostic chain
+            return f"Saved screenshot to {path}"
         raise UnsupportedTool("screenshot: no working capture backend on this box")
 
     def run_shell(self, command: str) -> str:

@@ -1,5 +1,5 @@
 {
-  "$comment": "hands.mcp.v1 — FROZEN 2026-07-09. The tool surface the agent sees, exposed by hands/surface.py as both MCP tools and local HTTP (ADR-058 D4 co-tenant pattern). Tool list ported from the proven prototype (reference/agent.py, 12 tools). Every tool carries an ADR-010 §9 trust tier. Change control per contracts/README.md: additive → v1.1 via PR; breaking → v2 + tell Grant.",
+  "$comment": "hands.mcp.v1 — FROZEN 2026-07-09. The tool surface the agent sees, exposed by hands/surface.py as both MCP tools and local HTTP (ADR-058 D4 co-tenant pattern). Tool list ported from the proven prototype (reference/agent.py, 12 tools). Every tool carries an ADR-010 §9 trust tier. Change control per contracts/README.md: additive → v1.1 via PR; breaking → v2 + tell Grant. rev.2 2026-07-12 (additive, GAP_CLOSING_PLAN Phase 0): type_text gains an optional 'target' arg + focus-guard semantics — it refuses (ok:false error:'refused: ...') when the focused window is a terminal, can't be resolved, or doesn't match 'target'.",
   "contract": "hands.mcp.v1",
   "tiers": {
     "$comment": "Enforced by hands/tiers.py at the surface, not by the client or agent. auto_allow: execute immediately. ask_first: per-invocation user confirmation required; the user MAY grant a session-scoped always-allow upgrade for the tool. always_confirm: per-invocation confirmation, no session upgrade possible. Confirmation is delivered through the active client (voice prompt or UI dialog); a denial returns ok:false error:'denied' to the agent — never silence. Tiers are per-tool in v1; per-argument escalation is a v1.1 candidate.",
@@ -43,10 +43,13 @@
     {
       "name": "type_text",
       "tier": "auto_allow",
-      "description": "Type text into whatever field is currently focused. Does not press Enter.",
+      "description": "Type text into the currently focused field. Does not press Enter. Focus-guarded: refuses (error 'refused: ...', nothing typed) if the focused window is a terminal, can't be identified, or doesn't match 'target'. Pass 'target' whenever the text is meant for a specific window.",
       "inputSchema": {
         "type": "object",
-        "properties": { "text": { "type": "string" } },
+        "properties": {
+          "text": { "type": "string" },
+          "target": { "type": "string", "description": "App name or window-title fragment the text is intended for; typing is refused if the focused window doesn't match it." }
+        },
         "required": ["text"],
         "additionalProperties": false
       }

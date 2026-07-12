@@ -27,7 +27,7 @@ class _FakeBackend(HandsBackend):
     def open_app(self, name): return f"open {name}"
     def web_search(self, query): return f"search {query}"
     def open_url(self, url): return f"url {url}"
-    def type_text(self, text): return "typed"
+    def type_text(self, text, target=None): return "typed"
     def press_keys(self, combo): return "pressed"
     def click_element(self, label): return "clicked"
     def mouse_click(self, x, y, button="left"): return "moused"

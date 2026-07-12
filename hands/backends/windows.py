@@ -21,7 +21,7 @@ import base64
 import shutil
 import subprocess
 
-from .base import HandsBackend, UnsupportedTool
+from .base import FocusInfo, HandsBackend, UnsupportedTool, focus_guard
 
 # Interpreter chain: Windows PowerShell 5.1 (`powershell`) is the historical
 # default, but a modern / Windows-11-lean box may ship ONLY PowerShell 7
@@ -90,6 +90,30 @@ def _sq(s: str) -> str:
     return s.replace("'", "''")
 
 
+def _focused_window() -> FocusInfo | None:
+    """Owning process + window title of the UIAutomation FocusedElement, for
+    the type_text focus-guard. Any failure (Session-0, no focus, PS error)
+    returns None, and the guard fails closed instead of typing blind."""
+    script = (
+        "Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes;"
+        "$foc=[System.Windows.Automation.AutomationElement]::FocusedElement;"
+        "if($foc -eq $null){exit 0};"
+        "$win=$foc;while($win -ne $null -and $win.Current.ControlType.ProgrammaticName -ne 'ControlType.Window'){$win=[System.Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($win)};"
+        "if($win -eq $null){$win=$foc};"
+        "$p=Get-Process -Id $win.Current.ProcessId -ErrorAction SilentlyContinue;"
+        "Write-Output ([string]$p.ProcessName);Write-Output ([string]$win.Current.Name)")
+    try:
+        out = _ps(script, timeout=12)
+    except Exception:  # noqa: BLE001 — unresolvable focus is the guard's business
+        return None
+    lines = out.splitlines()
+    app = lines[0].strip() if lines else ""
+    title = lines[1].strip() if len(lines) > 1 else ""
+    if not app and not title:
+        return None
+    return FocusInfo(app=app or None, title=title or None)
+
+
 def _sk_escape(text: str) -> str:
     # SendKeys treats + ^ % ~ ( ) { } [ ] specially → wrap them in braces.
     out = []
@@ -133,12 +157,15 @@ class WindowsBackend(HandsBackend):
 
     # -- keyboard / mouse ------------------------------------------------------
 
-    def type_text(self, text: str) -> str:
+    def type_text(self, text: str, target: str | None = None) -> str:
+        # Focus-guard BEFORE any keystroke leaves (Phase 0 #1): resolve where the
+        # keys would actually land, refuse terminals/unknown/mismatched targets.
+        where = focus_guard(_focused_window(), target)
         esc = _sk_escape(text).replace("'", "''")
         _ps("Add-Type -AssemblyName System.Windows.Forms; "
             f"[System.Windows.Forms.SendKeys]::SendWait('{esc}')")
         n = len(text)
-        return f"Typed {n} character{'s' if n != 1 else ''}"
+        return f"Typed {n} character{'s' if n != 1 else ''} into {where}"
 
     def press_keys(self, combo: str) -> str:
         parts = [p.strip().lower() for p in combo.replace(" ", "").split("+")

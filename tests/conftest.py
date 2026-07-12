@@ -1,0 +1,42 @@
+"""Shared test guardrails: NEVER touch the live desktop.
+
+pytest routinely runs on real, in-use machines (including Grant's active
+desktop), so no test may ever capture the actual screen, query real window
+focus, or inject anything. These autouse stubs pin the live seams the Phase 0
+work introduced:
+
+  - the Linux FUNCTIONAL capability probes (a real AT-SPI query / a real
+    throwaway screen capture) → replaced with presence-based stand-ins, so a
+    plain `capabilities()` call in a test can't spawn flameshot against the
+    developer's screen;
+  - `_focused_window` on all three backends → a benign fake window, so
+    `type_text` tests exercise the guard without an accessibility round-trip.
+
+A test that exercises the REAL probe/guard logic monkeypatches these seams
+itself (a test-level monkeypatch overrides the autouse stub) or calls the
+module originals captured at import time — see tests/test_focus_guard.py.
+"""
+from __future__ import annotations
+
+import pytest
+
+from hands.backends import linux as _lx
+from hands.backends import macos as _mac
+from hands.backends import windows as _win
+from hands.backends.base import FocusInfo
+
+_FAKE_FOCUS = FocusInfo(app="TestApp", title="Test Window")
+
+
+@pytest.fixture(autouse=True)
+def _no_live_desktop(monkeypatch):
+    # Presence-based stand-ins for the functional probes (reads _lx._which at
+    # call time, so tests that monkeypatch _which keep their semantics).
+    monkeypatch.setattr(_lx, "_atspi_probe", lambda: True)
+    monkeypatch.setattr(
+        _lx, "_screenshot_probe",
+        lambda: any(_lx._which(c) for c in
+                    ("grim", "gnome-screenshot", "spectacle", "scrot", "import", "flameshot")))
+    monkeypatch.setattr(_lx.LinuxBackend, "_focused_window", lambda self: _FAKE_FOCUS)
+    monkeypatch.setattr(_mac, "_focused_window", lambda: _FAKE_FOCUS)
+    monkeypatch.setattr(_win, "_focused_window", lambda: _FAKE_FOCUS)

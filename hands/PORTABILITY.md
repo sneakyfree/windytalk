@@ -43,3 +43,36 @@ display. `list_apps`/`read_screen` work anyway (AT-SPI uses the session bus).
 
 `GET /capabilities` on the hands surface reports the live blade-list for the
 current machine, so the agent knows what it can do before it tries.
+
+## type_text focus-guard (GAP_CLOSING_PLAN Phase 0 #1)
+
+Keystroke injection is the one action that lands wherever focus happens to be —
+live testing proved a mis-focused `type_text` can submit text into another
+running terminal session. So every backend resolves the FOCUSED window before
+typing (Linux: AT-SPI active frame; macOS: System Events frontmost process;
+Windows: UIAutomation FocusedElement) and **refuses** — typing nothing,
+returning `ok:false error:"refused: ..."` — when:
+
+1. focus can't be resolved (never type blind);
+2. the focused app is a terminal (matched on app name / AT-SPI focused-element
+   role, never the window title; `run_shell` is the sanctioned shell path);
+3. the optional `target` arg (app name or title fragment) doesn't match the
+   focused window.
+
+Agents should pass `target` whenever the text is meant for a specific window.
+On success the result reports where it typed ("Typed 12 characters into
+firefox"). `WINDYTALK_TYPE_GUARD=off` disables the guard — dev/chaos only.
+`press_keys` is not yet guarded (Phase 0 scope decision — revisit if a live
+finding demands it).
+
+## Functional capability probes (Phase 0 #2)
+
+On Linux, `capabilities()` no longer equates binary presence with function —
+grim was present on GNOME yet refused by the compositor, and `gi` can import
+while the accessibility bus is dead. AT-SPI (`read_screen`/`list_apps`/
+`click_element`/the `type_text` guard) and `screenshot` are decided by one real
+probe each (an AT-SPI desktop query; a throwaway capture through the real
+chain), cached per backend instance. `type_text` requires working AT-SPI
+because the focus-guard fails closed without it. macOS/Windows stay
+presence-based deliberately: their checks were fleet-validated accurate, and a
+macOS capture probe would cache a false negative whenever the display sleeps.

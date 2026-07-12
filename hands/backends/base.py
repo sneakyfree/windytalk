@@ -11,8 +11,10 @@ tool never disappears from the list (hands.mcp.v1 platform_note).
 """
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 # The frozen hands.mcp.v1 tool names, in contract order.
@@ -25,6 +27,98 @@ TOOL_NAMES = (
 
 class UnsupportedTool(NotImplementedError):
     """This backend does not implement this tool on this platform."""
+
+
+class GuardRefused(Exception):
+    """The focus-guard refused to inject keystrokes (nothing was typed).
+
+    The surface maps this to ok:false, error:"refused: ..." so the agent knows
+    the action did NOT happen and why — never a silent no-op, never a raw crash.
+    """
+
+
+@dataclass(frozen=True)
+class FocusInfo:
+    """What the backend could resolve about the currently focused window."""
+    app: str | None = None    # owning application (process/AT-SPI app name)
+    title: str | None = None  # window title, when the platform exposes one
+    role: str | None = None   # accessibility role of the focused ELEMENT, if known
+
+
+# Apps whose focused window must NEVER receive injected keystrokes. Proven
+# catastrophe class (live stress 2026-07-12): a mis-focused type_text submitted
+# its text as a prompt into another live Claude Code terminal — a shell command
+# would have executed. Multiple live terminals per box is the fleet norm.
+# Names are matched lowercase against the focused APP name (not the window
+# title — a browser tab titled "terminal emulators" must not false-refuse).
+TERMINAL_APPS = frozenset({
+    # Linux (AT-SPI application names / binaries)
+    "gnome-terminal", "gnome-terminal-server", "ptyxis", "org.gnome.ptyxis",
+    "konsole", "org.kde.konsole", "xterm", "uxterm", "kitty", "alacritty",
+    "foot", "footclient", "tilix", "urxvt", "rxvt", "st", "guake", "yakuake",
+    "lxterminal", "sakura", "terminology", "cool-retro-term",
+    # macOS (System Events frontmost process names)
+    "terminal", "iterm", "iterm2", "warp", "hyper", "tabby", "ghostty", "rio",
+    "termius",
+    # Windows (process names)
+    "windowsterminal", "wt", "cmd", "conhost", "openconsole", "powershell",
+    "powershell_ise", "pwsh", "mintty", "putty", "conemu", "conemu64",
+})
+
+
+def is_terminal_focus(focus: FocusInfo) -> bool:
+    """Is the focused window a terminal? Checks the focused ELEMENT's
+    accessibility role first ('terminal' is the AT-SPI role of a VTE pane —
+    this also catches a terminal embedded in a non-terminal app like an IDE),
+    then the app name against the known-terminal set plus a 'term' substring
+    (xterm, wezterm, qterminal, terminator, Windows Terminal, ...). Biased
+    fail-closed: a rare false positive refuses a typing action; a false
+    negative injects keystrokes into a live shell."""
+    if focus.role and "terminal" in focus.role.lower():
+        return True
+    app = (focus.app or "").strip().lower()
+    if not app:
+        return False
+    return app in TERMINAL_APPS or "term" in app
+
+
+def _guard_disabled() -> bool:
+    # Dev/chaos escape hatch only (mirrors WINDYTALK_ALLOW_FOREIGN_RELAUNCH):
+    # never set it on a machine with live terminals you care about.
+    return os.environ.get("WINDYTALK_TYPE_GUARD", "").lower() in ("off", "0", "disabled")
+
+
+def focus_guard(focus: FocusInfo | None, target: str | None = None) -> str:
+    """The type_text safety gate (GAP_CLOSING_PLAN Phase 0 #1). Decide whether
+    injected keystrokes may proceed given where focus actually is. Returns the
+    focused-window label to report typing into; raises GuardRefused otherwise.
+
+    Rules (fail closed — keystrokes into the wrong window are unrecoverable):
+      1. Focus unresolvable            → refuse: never type blind.
+      2. Focused app is a terminal     → refuse: run_shell is the shell path.
+      3. `target` given, focus doesn't match it (case-insensitive substring of
+         app name or window title)     → refuse: wrong window frontmost.
+    """
+    if _guard_disabled():
+        return (focus.app or focus.title) if focus else "unknown window (guard disabled)"
+    if focus is None or not (focus.app or focus.title):
+        raise GuardRefused(
+            "can't resolve the focused window (accessibility unavailable or no "
+            "active window) — refusing to type blind")
+    label = focus.app or focus.title
+    if is_terminal_focus(focus):
+        raise GuardRefused(
+            f"the focused window is a terminal ({label}) — type_text never injects "
+            "keystrokes into terminals; use run_shell to run shell commands")
+    if target and target.strip():
+        want = target.strip().lower()
+        haystack = " ".join(s for s in (focus.app, focus.title) if s).lower()
+        if want not in haystack:
+            shown = f"{label!r}" + (f" ({focus.title!r})" if focus.title and focus.title != label else "")
+            raise GuardRefused(
+                f"the focused window is {shown}, not the requested target "
+                f"{target!r} — bring the target window to the front first")
+    return label
 
 
 class Mechanism:
@@ -87,7 +181,7 @@ class HandsBackend(ABC):
     @abstractmethod
     def open_url(self, url: str) -> str: ...
     @abstractmethod
-    def type_text(self, text: str) -> str: ...
+    def type_text(self, text: str, target: str | None = None) -> str: ...
     @abstractmethod
     def press_keys(self, combo: str) -> str: ...
     @abstractmethod
@@ -113,3 +207,17 @@ class HandsBackend(ABC):
         surface/agent degrade gracefully instead of failing blindly. Default: all
         supported; OS backends override to reflect what's actually installed."""
         return {t: True for t in TOOL_NAMES}
+
+    def _probed(self, key: str, probe: Callable[[], bool]) -> bool:
+        """Run a FUNCTIONAL capability probe once per backend instance and cache
+        the verdict (GAP_CLOSING_PLAN Phase 0 #2). Presence of a binary is not
+        function — grim exists on GNOME yet fails — so capabilities that matter
+        get one real probe at first ask instead of an assumption. A probe that
+        raises means 'not functional', never a crash."""
+        cache = self.__dict__.setdefault("_probe_cache", {})
+        if key not in cache:
+            try:
+                cache[key] = bool(probe())
+            except Exception:  # noqa: BLE001 — a broken probe IS the answer: not functional
+                cache[key] = False
+        return cache[key]

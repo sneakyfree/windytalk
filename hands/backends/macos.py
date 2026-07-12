@@ -22,7 +22,7 @@ import shutil
 import subprocess
 from urllib.parse import quote_plus
 
-from .base import HandsBackend, Mechanism, run_chain
+from .base import FocusInfo, HandsBackend, Mechanism, focus_guard, run_chain
 
 _APP_ALIASES = {
     "browser": "Safari", "web browser": "Safari", "chrome": "Google Chrome",
@@ -120,6 +120,27 @@ def _quartz_scroll(amount: int) -> None:
     Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
 
 
+def _focused_window() -> FocusInfo | None:
+    """Frontmost process (+ front-window title, best-effort) via System Events,
+    for the type_text focus-guard. Any failure — including no Accessibility
+    permission — returns None, and the guard fails closed instead of typing
+    blind."""
+    try:
+        app = _osa('tell application "System Events" to get name of first process '
+                   'whose frontmost is true')
+    except Exception:  # noqa: BLE001 — unresolvable focus is the guard's business
+        return None
+    title = None
+    try:
+        title = _osa('tell application "System Events" to tell (first process whose '
+                     'frontmost is true) to get name of front window') or None
+    except Exception:  # noqa: BLE001 — a window with no title is fine; the app name carries
+        pass
+    if not app and not title:
+        return None
+    return FocusInfo(app=app or None, title=title)
+
+
 def _osa_str(s: str) -> str:
     """Escape a Python string for safe embedding inside an AppleScript "..." literal.
     Without this, a `"` in an agent-supplied app name / element label breaks out of
@@ -138,13 +159,15 @@ class MacOSBackend(HandsBackend):
         has_quartz = _quartz_available()
         # type/press work via cliclick OR the built-in osascript keystroke path;
         # mouse/scroll via cliclick OR pyobjc-Quartz. So a stock Mac (no cliclick)
-        # still types/keys through osascript.
+        # still types/keys through osascript. type_text additionally needs
+        # osascript for the focus-guard's frontmost-process resolution (the
+        # guard fails closed without it).
         keyboard = has_cliclick or has_osa
         pointer = has_cliclick or has_quartz
         return {
             "open_app": has_open or has_osa,
             "web_search": has_open, "open_url": has_open,
-            "type_text": keyboard, "press_keys": keyboard,
+            "type_text": keyboard and has_osa, "press_keys": keyboard,
             "mouse_click": pointer, "scroll": pointer,
             "click_element": has_osa, "read_screen": has_osa, "list_apps": has_osa,
             "screenshot": has_shot, "run_shell": True,
@@ -195,13 +218,16 @@ class MacOSBackend(HandsBackend):
         for _ in range(min(abs(int(amount)) or 1, 20)):
             _cliclick("kp:" + key)
 
-    def type_text(self, text: str) -> str:
+    def type_text(self, text: str, target: str | None = None) -> str:
+        # Focus-guard BEFORE any keystroke leaves (Phase 0 #1): resolve where the
+        # keys would actually land, refuse terminals/unknown/mismatched targets.
+        where = focus_guard(_focused_window(), target)
         run_chain([
             Mechanism("cliclick", lambda: _which("cliclick"), lambda: _cliclick("t:" + text)),
             Mechanism("osascript", lambda: _which("osascript"), lambda: _osa_type(text)),
         ], "type_text")
         n = len(text)
-        return f"Typed {n} character{'s' if n != 1 else ''}"
+        return f"Typed {n} character{'s' if n != 1 else ''} into {where}"
 
     def press_keys(self, combo: str) -> str:
         parts = [p.strip().lower() for p in combo.replace(" ", "").split("+") if p.strip()]
