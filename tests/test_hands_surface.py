@@ -186,6 +186,61 @@ def test_mcp_list_and_call(served):
     assert "list_apps" in call["result"]["content"][0]["text"]
 
 
+def _post_raw(url, payload, token="test-token"):
+    """POST returning (status, raw_bytes) — tolerates an empty 204 body."""
+    headers = {"Content-Type": "application/json", "X-Windytalk-Token": token}
+    req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=3) as r:
+            return r.status, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+
+
+def test_mcp_initialize_lifecycle(served):
+    # A standard MCP client sends `initialize` FIRST and aborts on -32601.
+    _, base = served
+    _, init = _post(base + "/mcp", {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+    assert init["result"]["protocolVersion"] == "2025-06-18"
+    assert init["result"]["serverInfo"]["name"] == "windytalk-hands"
+    # ping must return an empty result, not -32601.
+    _, png = _post(base + "/mcp", {"jsonrpc": "2.0", "id": 2, "method": "ping"})
+    assert png["result"] == {}
+
+
+def test_mcp_notification_gets_204_no_body(served):
+    # `notifications/initialized` is a JSON-RPC notification: no response body.
+    _, base = served
+    status, body = _post_raw(base + "/mcp", {"jsonrpc": "2.0", "method": "notifications/initialized"})
+    assert status == 204
+    assert body == b""
+
+
+def test_mcp_tools_call_is_canonical_json_and_structured(served):
+    # The str()-rendered-result bug: text must be VALID JSON and structuredContent present.
+    _, base = served
+    _, call = _post(base + "/mcp", {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                                    "params": {"name": "list_apps", "arguments": {}}})
+    text = call["result"]["content"][0]["text"]
+    parsed = json.loads(text)  # MUST parse — single-quote str() would raise here
+    assert parsed["ok"] is True
+    assert call["result"]["structuredContent"] == parsed
+
+
+def test_mcp_batch_array_is_invalid_request(served):
+    _, base = served
+    _, resp = _post(base + "/mcp", [{"jsonrpc": "2.0", "id": 1, "method": "ping"}])
+    assert resp["error"]["code"] == -32600
+
+
+def test_mcp_request_method_without_id_does_not_execute(served):
+    # A tools/call with no id is a notification: no response, and it must NOT run.
+    _, base = served
+    status, body = _post_raw(base + "/mcp", {"jsonrpc": "2.0", "method": "tools/call",
+                                             "params": {"name": "list_apps", "arguments": {}}})
+    assert status == 204 and body == b""
+
+
 # ---------- security: the CSRF/RCE hole is closed ----------
 
 def test_missing_token_is_401(served):

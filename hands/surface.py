@@ -23,6 +23,12 @@ from .tiers import TierPolicy
 
 _CONTRACT = Path(__file__).resolve().parent.parent / "contracts" / "hands.mcp.v1.json"
 
+# The MCP protocol version this server speaks. hands.mcp.v1 (frozen 2026-07-09)
+# predates the protocol pin; we adopt the same version the control surface uses
+# so a single client speaks to both surfaces identically.
+_MCP_PROTOCOL = "2025-06-18"
+_SERVER_VERSION = "1.0"
+
 
 def _load_tool_schemas() -> dict[str, dict]:
     doc = json.loads(_CONTRACT.read_text())
@@ -94,9 +100,36 @@ class HandsSurface:
 
     # -- MCP JSON-RPC ----------------------------------------------------------
 
-    def handle_mcp(self, req: dict) -> dict:
-        rid = req.get("id")
+    def handle_mcp(self, req: dict) -> dict | None:
+        """Spec-compliant MCP (2025-06-18) — the UNIVERSAL rail any AI client
+        (Claude Desktop, an external agent) plugs into, alongside the local
+        /invoke rail. Answers the `initialize` lifecycle, `ping`, and
+        `notifications/initialized`; serializes results as canonical JSON in the
+        text content AND as `structuredContent`. Returns None for a notification
+        (the transport then sends HTTP 204, no body). This replaces the earlier
+        starter that had no initialize lifecycle and rendered results with str()
+        (invalid JSON) — a standard client aborts on both.
+        """
+        # A batch (JSON array) or non-object is Invalid Request. MCP 2025-06-18
+        # removed batching; answer -32600 rather than mis-reading it.
+        if not isinstance(req, dict):
+            return {"jsonrpc": "2.0", "id": None,
+                    "error": {"code": -32600, "message": "Invalid Request"}}
         method = req.get("method")
+        rid = req.get("id")
+        # A message with NO id is a notification — the server must send no
+        # response. Distinguish absent (notification) from an explicit null id
+        # (a request): use membership, since req.get('id') is None for both.
+        if "id" not in req:
+            return None  # honors notifications/initialized and ignores the rest
+
+        if method == "initialize":
+            return {"jsonrpc": "2.0", "id": rid, "result": {
+                "protocolVersion": _MCP_PROTOCOL,
+                "capabilities": {"tools": {"listChanged": False}},
+                "serverInfo": {"name": "windytalk-hands", "version": _SERVER_VERSION}}}
+        if method == "ping":
+            return {"jsonrpc": "2.0", "id": rid, "result": {}}
         if method == "tools/list":
             tools = [{"name": t["name"], "description": t["description"],
                       "inputSchema": t["inputSchema"]} for t in self.tool_list()]
@@ -104,10 +137,13 @@ class HandsSurface:
         if method == "tools/call":
             params = req.get("params") or {}
             res = self.invoke(params.get("name"), params.get("arguments") or {})
-            text = res.get("result") if res["ok"] else res.get("error", "error")
-            return {"jsonrpc": "2.0", "id": rid,
-                    "result": {"content": [{"type": "text", "text": str(text)}],
-                               "isError": not res["ok"]}}
+            # Canonical JSON of the full {ok,result,error} envelope in BOTH
+            # representations — valid JSON always (never str()-rendered).
+            canonical = json.dumps(res)
+            return {"jsonrpc": "2.0", "id": rid, "result": {
+                "content": [{"type": "text", "text": canonical}],
+                "structuredContent": res,
+                "isError": not res["ok"]}}
         return {"jsonrpc": "2.0", "id": rid,
                 "error": {"code": -32601, "message": f"Method not found: {method}"}}
 
@@ -130,6 +166,12 @@ class HandsSurface:
                 # deliberately NO Access-Control-Allow-Origin: no site may read us.
                 self.end_headers()
                 self.wfile.write(body)
+
+            def _send_no_body(self, code):
+                # For a JSON-RPC notification: acknowledge with no body.
+                self.send_response(code)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
 
             def _guard(self) -> bool:
                 """Reject anything a browser/remote could send. A legit local
@@ -196,14 +238,22 @@ class HandsSurface:
                 except json.JSONDecodeError:
                     self._send(400, {"error": "bad json"})
                     return
-                if not isinstance(body, dict):
-                    self._send(400, {"error": "bad body"})
-                    return
                 try:
-                    if self.path.rstrip("/") == "/invoke":
+                    path = self.path.rstrip("/")
+                    if path == "/invoke":
+                        # /invoke expects a JSON object {tool, args}.
+                        if not isinstance(body, dict):
+                            self._send(400, {"error": "bad body"})
+                            return
                         self._send(200, surface.invoke(body.get("tool"), body.get("args")))
-                    elif self.path.rstrip("/") == "/mcp":
-                        self._send(200, surface.handle_mcp(body))
+                    elif path == "/mcp":
+                        # handle_mcp accepts any JSON (a batch/array -> -32600) and
+                        # returns None for a notification (no response body -> 204).
+                        resp = surface.handle_mcp(body)
+                        if resp is None:
+                            self._send_no_body(204)
+                        else:
+                            self._send(200, resp)
                     else:
                         self._send(404, {"error": "not found"})
                 except Exception as e:  # noqa: BLE001 — never leak a raw traceback / drop the socket
