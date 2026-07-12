@@ -174,3 +174,107 @@ def test_linux_capabilities_reflect_the_wider_mechanism_set(monkeypatch):
     assert caps["type_text"] is True, "wtype alone must satisfy the input capability"
     assert caps["press_keys"] is True
     assert caps["screenshot"] is True, "grim alone must satisfy the screenshot capability"
+
+
+# ============================ macOS adapter =====================================
+
+from hands.backends import macos as mac  # noqa: E402
+
+
+def test_macos_type_pivots_from_cliclick_to_osascript(monkeypatch):
+    # A stock Mac has NO cliclick; typing must pivot to the built-in osascript.
+    monkeypatch.setattr(mac, "_which", lambda t: t if t == "osascript" else None)
+    ran = []
+    monkeypatch.setattr(mac, "_cliclick", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("cliclick absent")))
+    monkeypatch.setattr(mac, "_osa", lambda script, **k: ran.append(script) or "")
+    out = mac.MacOSBackend().type_text("hi there")
+    assert out == "Typed 8 characters"
+    assert ran and "keystroke" in ran[0], "must have typed via osascript keystroke"
+
+
+def test_macos_press_keys_uses_osascript_when_cliclick_absent(monkeypatch):
+    monkeypatch.setattr(mac, "_which", lambda t: t if t == "osascript" else None)
+    scripts = []
+    monkeypatch.setattr(mac, "_osa", lambda script, **k: scripts.append(script) or "")
+    out = mac.MacOSBackend().press_keys("cmd+c")
+    assert out == "Pressed cmd+c"
+    joined = "\n".join(scripts)
+    assert "command down" in joined and 'keystroke "c"' in joined
+
+
+def test_macos_all_input_mechanisms_absent_is_unsupported(monkeypatch):
+    monkeypatch.setattr(mac, "_which", lambda t: None)
+    monkeypatch.setattr(mac, "_quartz_available", lambda: False)
+    with pytest.raises(UnsupportedTool):
+        mac.MacOSBackend().type_text("x")
+    with pytest.raises(UnsupportedTool):
+        mac.MacOSBackend().mouse_click(1, 2)
+
+
+def test_macos_capabilities_stock_mac_types_via_osascript(monkeypatch):
+    # osascript + open + screencapture present; cliclick + Quartz absent.
+    present = {"osascript", "open", "screencapture"}
+    monkeypatch.setattr(mac, "_which", lambda t: t if t in present else None)
+    monkeypatch.setattr(mac, "_quartz_available", lambda: False)
+    caps = mac.MacOSBackend().capabilities()
+    assert caps["type_text"] is True, "stock Mac types via osascript"
+    assert caps["press_keys"] is True
+    assert caps["mouse_click"] is False, "no cliclick and no Quartz -> honest false for pointer"
+
+
+def test_macos_mouse_uses_quartz_when_cliclick_absent(monkeypatch):
+    monkeypatch.setattr(mac, "_which", lambda t: None)  # no cliclick
+    monkeypatch.setattr(mac, "_quartz_available", lambda: True)
+    hit = []
+    monkeypatch.setattr(mac, "_quartz_click", lambda x, y, b: hit.append((x, y, b)))
+    out = mac.MacOSBackend().mouse_click(5, 6, "left")
+    assert "clicked at (5, 6)" in out
+    assert hit == [(5, 6, "left")], "must have clicked via Quartz"
+
+
+# ============================ Windows adapter ===================================
+
+from hands.backends import windows as win  # noqa: E402
+
+
+def test_windows_ps_prefers_powershell_then_pwsh(monkeypatch):
+    # Only pwsh present (a PowerShell-7-only box) -> _ps must use it.
+    monkeypatch.setattr(win.shutil, "which", lambda t: t if t == "pwsh" else None)
+    assert win._ps_binary() == "pwsh"
+    # Both present -> Windows PowerShell 5.1 preferred.
+    monkeypatch.setattr(win.shutil, "which", lambda t: t if t in ("powershell", "pwsh") else None)
+    assert win._ps_binary() == "powershell"
+
+
+def test_windows_ps_no_interpreter_is_unsupported(monkeypatch):
+    monkeypatch.setattr(win.shutil, "which", lambda t: None)
+    with pytest.raises(UnsupportedTool):
+        win._ps("echo hi")
+
+
+def test_windows_ps_runs_on_pwsh_only_box(monkeypatch):
+    monkeypatch.setattr(win.shutil, "which", lambda t: t if t == "pwsh" else None)
+    seen = {}
+
+    class _R:
+        returncode = 0
+        stdout = "output"
+        stderr = ""
+
+    def fake_run(cmd, **k):
+        seen["binary"] = cmd[0]
+        return _R()
+
+    monkeypatch.setattr(win.subprocess, "run", fake_run)
+    out = win._ps("Get-Process")
+    assert out == "output"
+    assert seen["binary"] == "pwsh", "the tool ran on the only interpreter present"
+
+
+def test_windows_capabilities_true_on_pwsh_only(monkeypatch):
+    monkeypatch.setattr(win.shutil, "which", lambda t: t if t == "pwsh" else None)
+    caps = win.WindowsBackend().capabilities()
+    assert all(caps.values()), "a pwsh-only box must report the tools as supported"
+    monkeypatch.setattr(win.shutil, "which", lambda t: None)
+    caps2 = win.WindowsBackend().capabilities()
+    assert not any(caps2.values()), "no PowerShell at all -> honest all-false"
