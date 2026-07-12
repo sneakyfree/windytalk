@@ -30,6 +30,8 @@ import { makeEmitter } from "../dist/electron/control/emit.js";
 import { LogRing } from "../dist/electron/control/logring.js";
 import { LkgStore } from "../dist/electron/control/lkg.js";
 import { removeHeartbeat } from "../dist/electron/control/heartbeat.js";
+import { updateConfigured } from "../dist/electron/control/update-key.js";
+import { GithubReleasesSource } from "../dist/electron/control/ghsource.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEMO = process.env.WINDYTALK_DEMO || "";
@@ -220,10 +222,11 @@ async function bootControlPlane() {
       }
     },
     // Self-update (contract self_update). INERT until Grant embeds the signing
-    // key: updateConfigured() is false, so updateSource returns null and
-    // apply_update/check_for_update stay forced-honest. When keyed, a GitHub-
-    // Releases source is constructed here. Built inert, never faked.
-    updateSource: () => null,
+    // key: updateConfigured() is false, so no source is constructed and
+    // apply_update/check_for_update stay forced-honest. The moment the key
+    // lands in update-key.ts this becomes the live GitHub-Releases channel
+    // (contract-pinned) with no further code change. Built inert, never faked.
+    updateSource: () => (updateConfigured() ? new GithubReleasesSource() : null),
     freeBytes: () => {
       try {
         const st = fs.statfsSync(paths.stateDir);
