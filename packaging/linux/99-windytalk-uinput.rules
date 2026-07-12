@@ -1,0 +1,5 @@
+# Windy Talk: make the kernel's virtual-input device group-accessible so the
+# bundled ydotoold daemon (and nothing else unusual) can create a virtual
+# keyboard/mouse. Installed by firstrun-linux.sh; removing this file and
+# reloading udev fully reverses it.
+KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"
