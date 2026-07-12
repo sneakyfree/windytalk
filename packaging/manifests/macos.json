@@ -1,0 +1,30 @@
+{
+  "manifest": "windytalk-cocktail.macos.v1",
+  "os": "macos",
+  "artifacts": [
+    "Universal2 .dmg — ONE file containing BOTH Intel and Apple Silicon builds of everything (a literal 'fat binary'). The user never needs to know which chip they have."
+  ],
+  "floor": {
+    "os": "macOS 11 Big Sur (2020)+",
+    "arch": ["x86_64", "arm64 — same single artifact"]
+  },
+  "python_extra": [
+    {
+      "package": "pyobjc-framework-Quartz",
+      "import_name": "Quartz",
+      "profile": "optional",
+      "note": "native mouse prong (no cliclick needed); freeze wheels for BOTH arches into the bundled python. Absent on stock OC5 today — bundling turns this dormant prong on."
+    }
+  ],
+  "external_tools": {
+    "cliclick": { "provided_by": "bundled", "role": "keyboard + mouse; bundle a universal build" },
+    "osascript": { "provided_by": "os-builtin", "role": "AppleScript keystroke fallback — shipped with every Mac ever made; why a stock Mac can type with zero installs" },
+    "open": { "provided_by": "os-builtin", "role": "open_app / open_url" },
+    "screencapture": { "provided_by": "os-builtin", "role": "screenshot" }
+  },
+  "first_run_consent": [
+    "Accessibility (control this computer) — System Settings prompt, once",
+    "Screen Recording — System Settings prompt, once"
+  ],
+  "signing": "Developer ID signing + notarization are MANDATORY or Gatekeeper blocks first run with a scary dialog. GRANT ACTION: Apple Developer Program enrollment ($99/yr)."
+}

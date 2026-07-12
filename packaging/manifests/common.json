@@ -1,0 +1,48 @@
+{
+  "manifest": "windytalk-cocktail.common.v1",
+  "doctrine": "Fat installer. Ship EVERYTHING any variant of the target OS could need. Bring-your-own-runtime: the app NEVER uses the machine's Python or Node — it carries frozen private copies, identical on every machine forever. The only borrowed pieces are OS permanent built-ins that cannot be missing. Detection is used to WIRE and VERIFY at first run and to pick a working mechanism at runtime — never to decide what ships. Nothing is ever downloaded at runtime. Full doctrine: docs/PACKAGING.md.",
+  "runtimes": {
+    "electron": {
+      "provided_by": "bundled",
+      "note": "electron-builder payload carries a private Chromium + Node; zero system dependencies by construction"
+    },
+    "python": {
+      "provided_by": "bundled",
+      "version": "3.12",
+      "distribution": "python-build-standalone, frozen inside the app payload; system python is never consulted",
+      "pyproject_floor_source": "pyproject.toml requires-python"
+    }
+  },
+  "python_packages": [
+    { "package": "numpy", "import_name": "numpy", "profile": "core" },
+    { "package": "websockets", "import_name": "websockets", "profile": "core" },
+    {
+      "package": "faster-whisper",
+      "import_name": "faster_whisper",
+      "profile": "engine-local",
+      "note": "STT; large, wants CUDA; ships only in the local-engine payload profile, lazily imported"
+    },
+    {
+      "package": "kokoro-onnx",
+      "import_name": "kokoro_onnx",
+      "profile": "engine-local",
+      "note": "TTS; needs bundled model files; lazily imported"
+    },
+    {
+      "package": "openwakeword",
+      "import_name": "openwakeword",
+      "profile": "engine-local",
+      "note": "wake-word detection; lazily imported"
+    },
+    {
+      "package": "webrtcvad",
+      "import_name": "webrtcvad",
+      "profile": "engine-local",
+      "note": "voice-activity detection (engine/vad.py); C extension, lazily imported — CAUGHT BY THE DRIFT TEST on its first run, proof the manifests self-enforce"
+    }
+  ],
+  "payload_profiles": {
+    "client": "Electron app + frozen python + hands/control + OS tool cocktail. Small (~200MB class). Talks to a remote engine.",
+    "engine-local": "client + the engine-local python packages + speech models. This is the genuinely big payload (the 'extra gigabyte' Grant pre-approved)."
+  }
+}

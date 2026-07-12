@@ -1,0 +1,25 @@
+{
+  "manifest": "windytalk-cocktail.windows.v1",
+  "os": "windows",
+  "artifacts": [
+    "NSIS installer x64 (Windows 10/11)"
+  ],
+  "floor": {
+    "os": "Windows 10 x64 (2015)+. Old HARDWARE (~2008 and newer) is fully supported when running Win10 — the deliberate exclusion is dead OSes (XP/Vista/7/8): every modern runtime (Chromium, Node, Python, Microsoft's own tools) dropped them, so shipping there means shipping unpatchable security holes. Rationale: docs/PACKAGING.md.",
+    "arch": ["x64"],
+    "later": "arm64 build — the PowerShell path is architecture-neutral"
+  },
+  "python_extra": [],
+  "external_tools": {
+    "powershell": {
+      "provided_by": "os-builtin",
+      "role": "PowerShell 5.1 + .NET Framework (SendKeys, UIAutomation, System.Drawing, mouse P/Invoke) — part of Windows 10/11 itself. Entire surface validated on the GrantW laptop 2026-07-11, zero bugs."
+    },
+    "pwsh": {
+      "provided_by": "system-extra",
+      "role": "PowerShell 7 — interpreter fallback rung only (covers pwsh-only boxes); never required"
+    }
+  },
+  "note": "The leanest cocktail of the four: Electron (bundled) + frozen python (bundled) + our code. Windows itself provides every external tool.",
+  "signing": "Code signing strongly recommended (Azure Trusted Signing, ~$10/mo) or SmartScreen shows 'unrecognized app' and scares users off. GRANT ACTION."
+}

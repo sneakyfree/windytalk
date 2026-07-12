@@ -1,0 +1,52 @@
+{
+  "manifest": "windytalk-cocktail.linux.v1",
+  "os": "linux",
+  "artifacts": [
+    "AppImage x86_64 — primary; one fully self-contained file",
+    ".deb — convenience twin for Ubuntu/Mint, same payload"
+  ],
+  "floor": {
+    "os": "glibc 2.31+ (Ubuntu 20.04-era, 2020). Build the whole payload against this base so old and new distros both run it.",
+    "arch": ["x86_64"],
+    "later": "arm64 build from the same manifest"
+  },
+  "one_package_covers": "Wayland + X11 + GNOME + KDE + wlroots in a SINGLE package. The runtime fallback chains (hands/backends/base.py run_chain) pick the working tool live per action — builds are never split by session type, because the session can change under us at the login screen.",
+  "python_extra": [
+    {
+      "package": "PyGObject",
+      "import_name": "gi",
+      "profile": "optional",
+      "note": "AT-SPI read_screen/click_element prong; freeze into the bundled python if feasible, else the capability honestly reports false (tri-state doctrine)"
+    }
+  ],
+  "external_tools": {
+    "xdotool": { "provided_by": "bundled", "role": "X11 keyboard + mouse" },
+    "ydotool": { "provided_by": "bundled", "role": "uinput input client — works on X11 AND every Wayland compositor" },
+    "ydotoold": {
+      "provided_by": "bundled",
+      "invoked_by_backend": false,
+      "role": "uinput daemon ydotool requires. Ubuntu/Debian apt ships the CLIENT ONLY — no daemon (validated on OC3, 2026-07-11), so without bundling this, GNOME-Wayland input is dead out of the box. Installed as a system service by packaging/linux/firstrun-linux.sh."
+    },
+    "wtype": { "provided_by": "bundled", "role": "wlroots virtual-keyboard typing (fails on GNOME by design — the chain pivots)" },
+    "grim": { "provided_by": "bundled", "role": "wlroots screenshot (fails on GNOME by design — the chain pivots)" },
+    "scrot": { "provided_by": "bundled", "role": "X11 screenshot" },
+    "gnome-screenshot": { "provided_by": "bundled", "role": "GNOME screenshot, works on both X11 and Wayland sessions (validated on OC3 GNOME-Wayland: real 1.37MB PNG)" },
+    "spectacle": { "provided_by": "system-extra", "role": "KDE screenshot; KDE installs it by default — an extra rung when present" },
+    "import": { "provided_by": "system-extra", "role": "ImageMagick X11 capture — redundant rung under scrot" },
+    "flameshot": { "provided_by": "system-extra", "role": "last-resort raw capture rung" },
+    "xdg-open": { "provided_by": "bundled", "role": "open_url / open_app fallback — a portable shell script, trivially bundleable" },
+    "gtk-launch": { "provided_by": "system-extra", "role": "desktop-file launcher; present on GTK desktops; xdg-open covers when absent" },
+    "bash": { "provided_by": "os-builtin", "role": "run_shell tool; present on every desktop Linux" }
+  },
+  "coverage_matrix": {
+    "input_x11": ["xdotool (bundled)", "ydotool (bundled)"],
+    "input_wayland_gnome_kde": ["ydotool + ydotoold (bundled) — the ONLY thing that works here; this is why ydotoold must ship"],
+    "input_wayland_wlroots": ["ydotool (bundled)", "wtype (bundled)"],
+    "screenshot_x11": ["scrot (bundled)", "gnome-screenshot (bundled)"],
+    "screenshot_gnome_wayland": ["gnome-screenshot (bundled)"],
+    "screenshot_kde_wayland": ["spectacle (system — KDE default install)"],
+    "screenshot_wlroots_wayland": ["grim (bundled)"]
+  },
+  "first_run_root_step": "ONE sudo prompt in the wizard runs packaging/linux/firstrun-linux.sh: installs the uinput udev rule + the windytalk-ydotoold system service, then verifies the socket is alive. Everything else is user-level.",
+  "sandboxed_formats_rejected": "Flatpak/Snap deliberately NOT offered for the hands payload — their sandboxes block uinput/desktop control, which is the whole product."
+}
