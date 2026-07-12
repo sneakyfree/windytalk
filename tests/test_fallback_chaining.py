@@ -278,3 +278,66 @@ def test_windows_capabilities_true_on_pwsh_only(monkeypatch):
     monkeypatch.setattr(win.shutil, "which", lambda t: None)
     caps2 = win.WindowsBackend().capabilities()
     assert not any(caps2.values()), "no PowerShell at all -> honest all-false"
+
+
+# ===== real-machine stress-test findings (OC2 Ubuntu, OC5 Intel Mac) ==============
+
+def test_ydotool_socket_uses_current_uid_not_hardcoded_1000(monkeypatch):
+    # The default socket path must follow the ACTUAL login uid — hardcoding 1000
+    # silently broke ydotool on any box where the user isn't uid 1000.
+    monkeypatch.delenv("YDOTOOL_SOCKET", raising=False)
+    monkeypatch.setattr(lx.os, "getuid", lambda: 1234)
+    assert lx._ydotool_socket() == "/run/user/1234/.ydotool_socket"
+    monkeypatch.setenv("YDOTOOL_SOCKET", "/custom/sock")
+    assert lx._ydotool_socket() == "/custom/sock", "explicit env still wins"
+
+
+def test_ydotool_unavailable_without_daemon_or_uinput(monkeypatch):
+    # Found on OC2: no ydotoold + no /dev/uinput access -> ydotool crashes ~1.5s
+    # in. It must be treated as ABSENT so the chain skips it (no wasted latency).
+    monkeypatch.setattr(lx, "_which", lambda t: "/usr/bin/ydotool" if t == "ydotool" else None)
+    monkeypatch.delenv("YDOTOOL_SOCKET", raising=False)
+    monkeypatch.setattr(lx.os.path, "exists", lambda p: False)   # no socket
+    monkeypatch.setattr(lx.os, "access", lambda p, m: False)     # no uinput
+    assert lx._ydotool_available() is False
+
+
+def test_ydotool_available_when_socket_present(monkeypatch):
+    monkeypatch.setattr(lx, "_which", lambda t: "/usr/bin/ydotool" if t == "ydotool" else None)
+    monkeypatch.setattr(lx.os.path, "exists", lambda p: True)    # ydotoold socket present
+    assert lx._ydotool_available() is True
+
+
+def test_ydotool_available_via_uinput_when_no_socket(monkeypatch):
+    monkeypatch.setattr(lx, "_which", lambda t: "/usr/bin/ydotool" if t == "ydotool" else None)
+    monkeypatch.setattr(lx.os.path, "exists", lambda p: False)   # no socket
+    monkeypatch.setattr(lx.os, "access", lambda p, m: p == "/dev/uinput")  # uinput writable
+    assert lx._ydotool_available() is True
+
+
+def test_chain_skips_doomed_ydotool_and_never_runs_it(monkeypatch):
+    # Wayland order is [ydotool, wtype, xdotool]. ydotool is installed but has no
+    # daemon/uinput -> it must be SKIPPED (never executed), pivoting straight to
+    # wtype with zero latency, not crashed-into.
+    monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    monkeypatch.delenv("WINDYTALK_INPUT", raising=False)
+    monkeypatch.setattr(lx, "_which", lambda t: t if t in ("ydotool", "wtype") else None)
+    monkeypatch.setattr(lx, "_ydotool_available", lambda: False)  # daemon/uinput down
+    ydotool_ran = []
+    wtype_ran = []
+    monkeypatch.setattr(lx, "_ydotool", lambda *a, **k: ydotool_ran.append(a))
+    monkeypatch.setattr(lx, "_wtype", lambda *a, **k: wtype_ran.append(a))
+    out = lx.LinuxBackend().type_text("hi")
+    assert out == "Typed 2 characters"
+    assert ydotool_ran == [], "a doomed ydotool must be skipped, never executed"
+    assert wtype_ran, "typing pivoted straight to wtype"
+
+
+def test_capabilities_input_false_when_only_doomed_ydotool(monkeypatch):
+    # GNOME-Wayland reality: only ydotool installed, but no daemon/uinput -> input
+    # is honestly unsupported (not a false 'yes').
+    monkeypatch.setattr(lx, "_which", lambda t: "/usr/bin/ydotool" if t == "ydotool" else None)
+    monkeypatch.setattr(lx, "_ydotool_available", lambda: False)
+    caps = lx.LinuxBackend().capabilities()
+    assert caps["type_text"] is False, "doomed-only ydotool -> honest unsupported"
