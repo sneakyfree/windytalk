@@ -1,0 +1,84 @@
+{
+  "$comment": "mcp-conformance.v1 — the SINGLE shared rulebook of MCP (2025-06-18) behaviors that EVERY Windy Talk MCP surface must satisfy, regardless of language. control.mcp.v1 (TypeScript, apps/desktop/electron/control/mcp.ts) and hands.mcp.v1 (Python, hands/surface.py) each ship a thin driver that feeds these exact cases to their handler and asserts the result. The behaviors live HERE, in one file both rails read — so the two implementations can never silently drift (which is exactly how the hands str()/initialize gap arose: two separate implementations of the same idea, one got fixed, one didn't). A new surface inherits the whole guarantee by adding a driver. Adding a case tightens BOTH rails at once. $SAFE_READ_TOOL is substituted by each driver with a known safe, side-effect-free read tool on that surface.",
+  "contract": "mcp-conformance.v1",
+  "mcp_protocol": "2025-06-18",
+  "$assert_ops": {
+    "equal": "[path, value] — the value at `path` in the response deep-equals `value`.",
+    "type": "[path, typename] — the runtime type at `path` is `typename` (object|array|string|boolean|number|null).",
+    "nonempty_array": "[path] — the value at `path` is an array with length >= 1.",
+    "structured_matches_text": "[] — JSON.parse(result.content[0].text) deep-equals result.structuredContent (canonical-JSON + structuredContent must agree, and the text must be valid JSON)."
+  },
+  "$path_note": "Dotted path into the response; a numeric segment indexes an array (e.g. result.content.0.text). `id` reads the top-level JSON-RPC id.",
+  "cases": [
+    {
+      "name": "initialize echoes protocolVersion 2025-06-18 + serverInfo",
+      "request": { "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} },
+      "expect": { "asserts": [
+        ["equal", "result.protocolVersion", "2025-06-18"],
+        ["type", "result.capabilities.tools", "object"],
+        ["type", "result.serverInfo.name", "string"],
+        ["equal", "id", 1]
+      ] }
+    },
+    {
+      "name": "ping returns an empty result object",
+      "request": { "jsonrpc": "2.0", "id": 2, "method": "ping" },
+      "expect": { "asserts": [["equal", "result", {}], ["equal", "id", 2]] }
+    },
+    {
+      "name": "notifications/initialized gets NO response (it is a notification)",
+      "request": { "jsonrpc": "2.0", "method": "notifications/initialized" },
+      "expect": { "no_response": true }
+    },
+    {
+      "name": "a request method sent WITHOUT an id is a notification: no response, no execution",
+      "request": { "jsonrpc": "2.0", "method": "tools/call", "params": { "name": "$SAFE_READ_TOOL", "arguments": {} } },
+      "expect": { "no_response": true }
+    },
+    {
+      "name": "a batch (JSON array) body is Invalid Request (-32600), not a silent notification",
+      "request": [{ "jsonrpc": "2.0", "id": 1, "method": "ping" }],
+      "expect": { "asserts": [["equal", "error.code", -32600]] }
+    },
+    {
+      "name": "an unknown method returns -32601 and echoes the id",
+      "request": { "jsonrpc": "2.0", "id": 5, "method": "resources/list" },
+      "expect": { "asserts": [["equal", "error.code", -32601], ["equal", "id", 5]] }
+    },
+    {
+      "name": "tools/list returns a non-empty array of {name, description, inputSchema}",
+      "request": { "jsonrpc": "2.0", "id": 6, "method": "tools/list" },
+      "expect": { "asserts": [
+        ["nonempty_array", "result.tools"],
+        ["type", "result.tools.0.name", "string"],
+        ["type", "result.tools.0.description", "string"],
+        ["type", "result.tools.0.inputSchema", "object"]
+      ] }
+    },
+    {
+      "name": "tools/call returns canonical JSON text AND matching structuredContent (never str()-rendered)",
+      "request": { "jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": { "name": "$SAFE_READ_TOOL", "arguments": {} } },
+      "expect": { "asserts": [
+        ["equal", "result.content.0.type", "text"],
+        ["type", "result.structuredContent", "object"],
+        ["type", "result.isError", "boolean"],
+        ["structured_matches_text"]
+      ] }
+    },
+    {
+      "name": "id:0 is a request (falsy but present) — echoed, not dropped",
+      "request": { "jsonrpc": "2.0", "id": 0, "method": "ping" },
+      "expect": { "asserts": [["equal", "id", 0], ["equal", "result", {}]] }
+    },
+    {
+      "name": "a string id is echoed",
+      "request": { "jsonrpc": "2.0", "id": "abc", "method": "ping" },
+      "expect": { "asserts": [["equal", "id", "abc"], ["equal", "result", {}]] }
+    },
+    {
+      "name": "id:null (present) is a request, not a notification — echoed as null",
+      "request": { "jsonrpc": "2.0", "id": null, "method": "ping" },
+      "expect": { "asserts": [["equal", "id", null], ["equal", "result", {}]] }
+    }
+  ]
+}
