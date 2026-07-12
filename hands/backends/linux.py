@@ -17,6 +17,7 @@ import subprocess
 from pathlib import Path
 from urllib.parse import quote_plus
 
+from ..coords import geometry_for
 from .base import FocusInfo, HandsBackend, Mechanism, UnsupportedTool, focus_guard, run_chain
 
 
@@ -92,7 +93,7 @@ def _on_x11() -> bool:
 
 
 def _input_order() -> list[str]:
-    """Preferred order of input mechanisms for THIS session. WINDYTALK_INPUT
+    """Preferred order of KEYBOARD mechanisms for THIS session. WINDYTALK_INPUT
     forces one first. Every mechanism still gets a turn if the preferred one is
     absent or fails — the whole point of the chain."""
     order = ["xdotool", "ydotool", "wtype"]
@@ -102,6 +103,41 @@ def _input_order() -> list[str]:
     if _on_x11():
         return ["xdotool", "ydotool", "wtype"]  # X11-native first, then uinput, then virtual-kbd
     return ["ydotool", "wtype", "xdotool"]  # Wayland: uinput, virtual-kbd, then XWayland
+
+
+def _is_gnome() -> bool:
+    return "gnome" in (os.environ.get("XDG_CURRENT_DESKTOP") or "").lower()
+
+
+def _pointer_order() -> list[str]:
+    """Preferred order of POINTER mechanisms — deliberately NOT _input_order.
+    The live finding this encodes (Phase 1): Mutter honors ydotool's virtual
+    KEYBOARD but silently ignores its virtual POINTER on every GNOME-Wayland
+    box (any DPI) — the click 'succeeds' while the cursor never moves. A
+    phantom prong is worse than a missing one (the chain can't detect a lying
+    success), so on GNOME-Wayland the pointer is portal-ONLY; other Wayland
+    compositors (wlroots honors virtual pointers) keep ydotool after the
+    portal. WINDYTALK_POINTER forces one first."""
+    if _on_x11():
+        order = ["xdotool", "ydotool", "portal"]
+    elif _is_gnome():
+        order = ["portal"]
+    else:
+        order = ["portal", "ydotool", "xdotool"]
+    pref = os.environ.get("WINDYTALK_POINTER")
+    if pref in ("xdotool", "ydotool", "portal"):
+        return [pref] + [m for m in order if m != pref]
+    return order
+
+
+def _portal_available() -> bool:
+    """Is the RemoteDesktop portal (with pointer support) on the session bus?
+    A real property read — never pops the grant dialog."""
+    try:
+        from .portal import PortalPointer
+        return PortalPointer.available()
+    except Exception:  # noqa: BLE001 — no gi / no bus ⇒ no portal
+        return False
 
 
 def _ydotool(*args: str, timeout: float = 10) -> None:
@@ -209,6 +245,16 @@ class LinuxBackend(HandsBackend):
         input_ok = _which("xdotool") is not None or _which("wtype") is not None or _ydotool_available()
         atspi_ok = self._probed("atspi", _atspi_probe)
         shot_ok = self._probed("screenshot", _screenshot_probe)
+        # Pointer honesty (Phase 1): wtype has no pointer; ydotool's pointer is
+        # a PHANTOM on GNOME-Wayland (Mutter ignores it while it reports
+        # success) so it must not satisfy the capability there — the portal is
+        # the GNOME-Wayland pointer, probed for real presence on the bus.
+        if _on_x11():
+            pointer_ok = _which("xdotool") is not None or _ydotool_available()
+        elif _is_gnome():
+            pointer_ok = self._probed("portal", _portal_available)
+        else:
+            pointer_ok = self._probed("portal", _portal_available) or _ydotool_available()
         has_launch = shutil.which("gtk-launch") is not None
         has_xdg = shutil.which("xdg-open") is not None
         return {
@@ -216,8 +262,10 @@ class LinuxBackend(HandsBackend):
             # type_text needs AT-SPI too: the focus-guard fails closed when it
             # can't resolve where keystrokes would land (unverifiable = unsafe).
             "type_text": input_ok and atspi_ok, "press_keys": input_ok,
-            "mouse_click": input_ok, "scroll": input_ok,
-            "click_element": atspi_ok and input_ok, "read_screen": atspi_ok,
+            "mouse_click": pointer_ok, "scroll": pointer_ok,
+            # click_element's do_action path needs no pointer at all; the
+            # coordinate fallback does, so pointer-or-action ≈ atspi is the gate.
+            "click_element": atspi_ok, "read_screen": atspi_ok,
             "list_apps": atspi_ok, "screenshot": shot_ok, "run_shell": True,
         }
 
@@ -268,7 +316,17 @@ class LinuxBackend(HandsBackend):
         }
         return [builders[k] for k in _input_order() if k in builders]
 
+    def _portal(self):
+        """The lazily-created, session-remembering portal pointer (one per
+        backend — its RemoteDesktop session persists across calls)."""
+        if getattr(self, "_portal_obj", None) is None:
+            from .portal import PortalPointer
+            self._portal_obj = PortalPointer()
+        return self._portal_obj
+
     def _click_mechs(self, x, y, button: str) -> list[Mechanism]:
+        # x/y here are LOGICAL (pointer-space) coordinates — mouse_click maps
+        # capture px → logical BEFORE building the chain.
         def xdotool_run():
             if x is not None and y is not None:
                 _xdotool("mousemove", str(int(x)), str(int(y)))
@@ -280,12 +338,14 @@ class LinuxBackend(HandsBackend):
             code = {"left": "0xC0", "right": "0xC1", "middle": "0xC2"}.get(button, "0xC0")
             _ydotool("click", code)
 
-        # wtype has no pointer control; the mouse chain is xdotool/ydotool only.
+        # wtype has no pointer control; pointer chains never include it.
         builders = {
             "xdotool": Mechanism("xdotool", lambda: _which("xdotool"), xdotool_run),
             "ydotool": Mechanism("ydotool", _ydotool_available, ydotool_run),
+            "portal": Mechanism("portal", _portal_available,
+                                lambda: self._portal().click(x, y, button)),
         }
-        return [builders[k] for k in _input_order() if k in builders]
+        return [builders[k] for k in _pointer_order() if k in builders]
 
     def _scroll_mechs(self, amount: int) -> list[Mechanism]:
         def xdotool_run():
@@ -299,8 +359,10 @@ class LinuxBackend(HandsBackend):
         builders = {
             "xdotool": Mechanism("xdotool", lambda: _which("xdotool"), xdotool_run),
             "ydotool": Mechanism("ydotool", _ydotool_available, ydotool_run),
+            "portal": Mechanism("portal", _portal_available,
+                                lambda: self._portal().scroll(int(amount))),
         }
-        return [builders[k] for k in _input_order() if k in builders]
+        return [builders[k] for k in _pointer_order() if k in builders]
 
     def type_text(self, text: str, target: str | None = None) -> str:
         # Focus-guard BEFORE any keystroke leaves (Phase 0 #1): resolve where the
@@ -315,8 +377,15 @@ class LinuxBackend(HandsBackend):
         return f"Pressed {combo}"
 
     def mouse_click(self, x: int, y: int, button: str = "left") -> str:
-        run_chain(self._click_mechs(x, y, button), "mouse_click")
+        lx, ly = self._map_capture_point(x, y)  # capture px → logical points
+        self._click_logical(lx, ly, button)
         return f"{button.capitalize()}-clicked at ({x}, {y})"
+
+    def _click_logical(self, x, y, button: str = "left") -> None:
+        """Click at coordinates ALREADY in pointer (logical) space — the entry
+        point for internally-derived coords (AT-SPI extents), which must not go
+        through the capture mapping twice."""
+        run_chain(self._click_mechs(x, y, button), "mouse_click")
 
     def scroll(self, amount: int) -> str:
         run_chain(self._scroll_mechs(amount), "scroll")
@@ -534,7 +603,10 @@ class LinuxBackend(HandsBackend):
         try:
             pt = match.get_position(A.CoordType.SCREEN)
             sz = match.get_size()
-            return self.mouse_click(pt.x + sz.width // 2, pt.y + sz.height // 2)
+            # AT-SPI extents are ALREADY logical — bypass the capture mapping.
+            cx, cy = pt.x + sz.width // 2, pt.y + sz.height // 2
+            self._click_logical(cx, cy)
+            return f"Clicked {match.get_name()!r}"
         except Exception as e:
             return f"Found {label!r} but couldn't click it: {e}"
 
@@ -551,8 +623,28 @@ class LinuxBackend(HandsBackend):
             name += ".png"
         path = str(shots_dir / name)
         if _capture(path) is not None:  # the shared session-agnostic chain
+            # Remember this capture's geometry: subsequent mouse_click coords
+            # are pixels of THIS image and get mapped to logical points.
+            self._last_capture = geometry_for(path, self._logical_size())
             return f"Saved screenshot to {path}"
         raise UnsupportedTool("screenshot: no working capture backend on this box")
+
+    def _logical_size(self) -> tuple[int, int] | None:
+        """Best-effort logical (pointer-space) screen size. The portal stream
+        is authoritative when a session exists (Wayland); X11 asks xdotool.
+        None → the capture is assumed to BE logical (exact on X11/identity
+        boxes; matches flameshot/portal captures on GNOME)."""
+        p = getattr(self, "_portal_obj", None)
+        if p is not None and p.stream_size:
+            return p.stream_size
+        if _on_x11() and _which("xdotool"):
+            try:
+                out = subprocess.run(["xdotool", "getdisplaygeometry"], check=True,
+                                     capture_output=True, text=True, timeout=5).stdout.split()
+                return int(out[0]), int(out[1])
+            except Exception:  # noqa: BLE001 — unknown size just means identity mapping
+                return None
+        return None
 
     def run_shell(self, command: str) -> str:
         # Safety is the surface's §9 always_confirm gate now, not a denylist (§3 ledger).

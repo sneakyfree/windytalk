@@ -69,9 +69,12 @@ def test_linux_capabilities_false_when_no_tools(monkeypatch):
     monkeypatch.setattr(linux.shutil, "which", lambda name: None)
     caps = linux.LinuxBackend().capabilities()
     for tool in ("type_text", "press_keys", "mouse_click", "scroll",
-                 "screenshot", "open_url", "click_element"):
+                 "screenshot", "open_url"):
         assert caps[tool] is False
     assert caps["run_shell"] is True  # shell needs no external tool
+    # click_element rides AT-SPI do_action (no pointer binary needed) — its
+    # capability follows the AT-SPI probe (stubbed True in conftest), not tools.
+    assert caps["click_element"] is True
 
 
 def test_windows_keymap_has_f6_through_f10():

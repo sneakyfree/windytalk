@@ -40,3 +40,6 @@ def _no_live_desktop(monkeypatch):
     monkeypatch.setattr(_lx.LinuxBackend, "_focused_window", lambda self: _FAKE_FOCUS)
     monkeypatch.setattr(_mac, "_focused_window", lambda: _FAKE_FOCUS)
     monkeypatch.setattr(_win, "_focused_window", lambda: _FAKE_FOCUS)
+    # The portal probe is a REAL session-bus property read — stub it False so a
+    # capabilities() call in a test never touches the developer's live portal.
+    monkeypatch.setattr(_lx, "_portal_available", lambda: False)

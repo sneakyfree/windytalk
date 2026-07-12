@@ -65,6 +65,37 @@ firefox"). `WINDYTALK_TYPE_GUARD=off` disables the guard — dev/chaos only.
 `press_keys` is not yet guarded (Phase 0 scope decision — revisit if a live
 finding demands it).
 
+## The pointer engine (GAP_CLOSING_PLAN Phase 1)
+
+Pointer mechanisms are session-aware and deliberately separate from the
+keyboard chain, because the live matrix split them: Mutter honors ydotool's
+virtual KEYBOARD but silently ignores its virtual POINTER on every
+GNOME-Wayland box — a phantom prong that reports success while the cursor
+never moves, which a fallback chain cannot detect.
+
+| Session | pointer chain (`WINDYTALK_POINTER` overrides) |
+|---|---|
+| X11 | xdotool → ydotool → portal |
+| GNOME-Wayland | **RemoteDesktop portal only** (ydotool = phantom, excluded) |
+| other Wayland (wlroots…) | portal → ydotool → xdotool |
+
+The portal path (`hands/backends/portal.py`) holds one remembered
+`org.freedesktop.portal.RemoteDesktop` session: a one-time "allow remote
+control" grant on first use, persisted via `persist_mode=2` + a single-use
+restore token (`~/.windytalk/portal_restore_token`, refreshed every Start),
+absolute motion through a linked ScreenCast stream, buttons/axis as evdev
+events. The capability probe is a real bus property read that never pops the
+dialog.
+
+**Coordinate spaces** (`hands/coords.py`): `mouse_click` coordinates are
+pixels of the most recent screenshot, mapped to the pointer's logical space
+using the recorded capture geometry (PNG IHDR size vs logical screen size —
+portal stream on Wayland, xdotool geometry on X11, Finder desktop bounds on
+macOS where Retina captures are 2x points). No screenshot on record → identity
+(native screen coordinates). AT-SPI-derived coordinates are already logical
+and go through `_click_logical`, bypassing the mapping. Single-monitor
+assumption in v1.
+
 ## Functional capability probes (Phase 0 #2)
 
 On Linux, `capabilities()` no longer equates binary presence with function —

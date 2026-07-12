@@ -21,6 +21,7 @@ import base64
 import shutil
 import subprocess
 
+from ..coords import geometry_for
 from .base import FocusInfo, HandsBackend, UnsupportedTool, focus_guard
 
 # Interpreter chain: Windows PowerShell 5.1 (`powershell`) is the historical
@@ -179,12 +180,16 @@ class WindowsBackend(HandsBackend):
         return f"Pressed {combo}"
 
     def mouse_click(self, x: int, y: int, button: str = "left") -> str:
+        # CopyFromScreen captures the same px space SetCursorPos speaks, so this
+        # is identity today — wired through the shared mapper anyway so a future
+        # DPI-virtualized capture can't silently reintroduce the offset bug.
+        lx, ly = self._map_capture_point(x, y)
         down, up = ("0x0008", "0x0010") if button == "right" else ("0x0002", "0x0004")
         _ps(
             "Add-Type @'\nusing System;using System.Runtime.InteropServices;\n"
             "public class M{[DllImport(\"user32.dll\")]public static extern bool SetCursorPos(int x,int y);"
             "[DllImport(\"user32.dll\")]public static extern void mouse_event(uint f,uint dx,uint dy,uint d,int e);}\n'@;"
-            f"[M]::SetCursorPos({int(x)},{int(y)});"
+            f"[M]::SetCursorPos({int(lx)},{int(ly)});"
             f"[M]::mouse_event({down},0,0,0,0);[M]::mouse_event({up},0,0,0,0)")
         return f"{button.capitalize()}-clicked at ({x}, {y})"
 
@@ -258,6 +263,8 @@ class WindowsBackend(HandsBackend):
             "$g=[System.Drawing.Graphics]::FromImage($bmp);"
             "$g.CopyFromScreen($b.Location,[System.Drawing.Point]::Empty,$b.Size);"
             f"$bmp.Save('{dest}');$g.Dispose();$bmp.Dispose()", timeout=20)
+        # VirtualScreen capture px == SetCursorPos px → logical omitted (identity).
+        self._last_capture = geometry_for(shots / name, None)
         return f"Saved screenshot to {shots / name}"
 
     def run_shell(self, command: str) -> str:

@@ -208,6 +208,18 @@ class HandsBackend(ABC):
         supported; OS backends override to reflect what's actually installed."""
         return {t: True for t in TOOL_NAMES}
 
+    def _map_capture_point(self, x: int, y: int) -> tuple[int, int]:
+        """Map a mouse_click coordinate from capture space (pixels of the most
+        recent screenshot — what a vision model reasons in) to the pointer's
+        logical space. Set by screenshot(); identity when no capture is on
+        record (the coords are then native screen coordinates). Coordinates the
+        backend derived ITSELF from AT-SPI are already logical and go straight
+        to _click_logical/the mechanisms, bypassing this."""
+        geom = getattr(self, "_last_capture", None)
+        if geom is None:
+            return int(x), int(y)
+        return geom.to_logical(x, y)
+
     def _probed(self, key: str, probe: Callable[[], bool]) -> bool:
         """Run a FUNCTIONAL capability probe once per backend instance and cache
         the verdict (GAP_CLOSING_PLAN Phase 0 #2). Presence of a binary is not
