@@ -140,6 +140,12 @@ def _portal_available() -> bool:
         return False
 
 
+def _vision_configured() -> bool:
+    """Is the vision-spine locator configured (WINDYTALK_VISION_URL set)?"""
+    from ..vision import VisionLocator
+    return VisionLocator.configured()
+
+
 def _ydotool(*args: str, timeout: float = 10) -> None:
     env = {**os.environ, "YDOTOOL_SOCKET": _ydotool_socket()}
     subprocess.run(["ydotool", *args], env=env, check=True,
@@ -263,9 +269,11 @@ class LinuxBackend(HandsBackend):
             # can't resolve where keystrokes would land (unverifiable = unsafe).
             "type_text": input_ok and atspi_ok, "press_keys": input_ok,
             "mouse_click": pointer_ok, "scroll": pointer_ok,
-            # click_element's do_action path needs no pointer at all; the
-            # coordinate fallback does, so pointer-or-action ≈ atspi is the gate.
-            "click_element": atspi_ok, "read_screen": atspi_ok,
+            # click_element's do_action path needs no pointer; the vision rung
+            # (Phase 2) also makes it work WITHOUT AT-SPI when a vision model,
+            # a working capture, and a pointer are all present.
+            "click_element": atspi_ok or (_vision_configured() and shot_ok and pointer_ok),
+            "read_screen": atspi_ok,
             "list_apps": atspi_ok, "screenshot": shot_ok, "run_shell": True,
         }
 
@@ -554,13 +562,26 @@ class LinuxBackend(HandsBackend):
         return f"On screen in {app.get_name()}:\n" + "\n".join(out[:120])
 
     def click_element(self, label: str) -> str:
-        A = _atspi()
-        app = self._active_app(A)
+        """The Phase-2 click ladder. AT-SPI is the FAST LANE (native, Firefox,
+        Electron — coord-free, ~free); the vision spine is the universal rung
+        for what accessibility can't see (Chrome is absent from the AT-SPI tree
+        and can't be woken at runtime):
+
+          1. AT-SPI element found → its named action (click|jump|activate…)
+          2. found but not actionable → its extents → coordinate click
+          3. not found / extents bogus → screenshot → vision model → click
+        """
+        try:
+            A = _atspi()
+            app = self._active_app(A)
+        except Exception:  # noqa: BLE001 — no AT-SPI at all: straight to the vision rung
+            A = app = None
         if app is None:
-            return "No active window to click in."
+            return (self._click_visual(label)
+                    or f"Couldn't find a clickable element named {label!r}.")
         want = label.strip().lower()
         exact, partial = [], []
-        budget = [800]
+        budget = [4000]  # web documents are big (a live Firefox tree walked 1170 nodes)
 
         def walk(node, depth=0):
             if budget[0] <= 0 or depth > 30:
@@ -591,24 +612,53 @@ class LinuxBackend(HandsBackend):
         walk(app)
         candidates = exact or partial
         if not candidates:
-            return f"Couldn't find a clickable element named {label!r}."
+            # AT-SPI is blind to it (Chrome, canvas UI, div-button web apps) —
+            # the vision spine is exactly for this.
+            return (self._click_visual(label)
+                    or f"Couldn't find a clickable element named {label!r}.")
         match = candidates[0]
-        try:
-            action = match.get_action_iface()
-            if action and action.get_n_actions() > 0:
-                action.do_action(0)
-                return f"Clicked {match.get_name()!r}"
-        except Exception:
-            pass
+        if self._do_preferred_action(match):
+            return f"Clicked {match.get_name()!r}"
+        # Found but not actionable: its box → coordinate click (plan item #6).
         try:
             pt = match.get_position(A.CoordType.SCREEN)
             sz = match.get_size()
-            # AT-SPI extents are ALREADY logical — bypass the capture mapping.
-            cx, cy = pt.x + sz.width // 2, pt.y + sz.height // 2
-            self._click_logical(cx, cy)
-            return f"Clicked {match.get_name()!r}"
-        except Exception as e:
-            return f"Found {label!r} but couldn't click it: {e}"
+            # Extents sanity: GTK4-on-Wayland apps can report window-RELATIVE
+            # positions (a live calculator button claimed 0,0) — clicking that
+            # would hit the screen corner. Reject the bogus shape and let the
+            # vision rung take it rather than click a wrong place.
+            if sz.width > 0 and sz.height > 0 and (pt.x, pt.y) != (0, 0):
+                # AT-SPI extents are ALREADY logical — bypass the capture mapping.
+                self._click_logical(pt.x + sz.width // 2, pt.y + sz.height // 2)
+                return f"Clicked {match.get_name()!r}"
+        except Exception:
+            pass
+        return (self._click_visual(label)
+                or f"Found {label!r} but couldn't click it (no action, unusable extents).")
+
+    def _do_preferred_action(self, node) -> bool:
+        """Run the node's most click-like AT-SPI action. Action NAMES vary by
+        toolkit (live-measured: links say 'jump', entries 'activate', buttons
+        'click'/'press') — prefer a recognized name, else fall back to action 0
+        as before."""
+        try:
+            a = node.get_action_iface()
+            if not a or a.get_n_actions() <= 0:
+                return False
+            names = []
+            for i in range(a.get_n_actions()):
+                try:
+                    names.append((a.get_action_name(i) or "").strip().lower())
+                except Exception:
+                    names.append("")
+            for want in ("click", "press", "jump", "activate", "activate-item", "default"):
+                if want in names:
+                    a.do_action(names.index(want))
+                    return True
+            a.do_action(0)
+            return True
+        except Exception:  # noqa: BLE001 — a failed action just moves the ladder on
+            return False
 
     # -- screenshot / shell ----------------------------------------------------
 

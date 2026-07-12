@@ -330,7 +330,11 @@ class MacOSBackend(HandsBackend):
             return str(e)
         except Exception:
             r = "notfound"
-        return f"Clicked {label!r}" if r == "clicked" else f"Couldn't find a clickable element named {label!r}."
+        if r == "clicked":
+            return f"Clicked {label!r}"
+        # AX couldn't see it (Chrome, canvas UI) → the vision spine (Phase 2).
+        return (self._click_visual(label)
+                or f"Couldn't find a clickable element named {label!r}.")
 
     # -- screenshot / shell ----------------------------------------------------
 

@@ -43,3 +43,7 @@ def _no_live_desktop(monkeypatch):
     # The portal probe is a REAL session-bus property read — stub it False so a
     # capabilities() call in a test never touches the developer's live portal.
     monkeypatch.setattr(_lx, "_portal_available", lambda: False)
+    # The vision lane must never be live in tests, whatever the dev box's env
+    # says — a stray WINDYTALK_VISION_URL would turn click tests into real
+    # screenshots + model calls.
+    monkeypatch.delenv("WINDYTALK_VISION_URL", raising=False)

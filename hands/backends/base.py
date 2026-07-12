@@ -208,6 +208,31 @@ class HandsBackend(ABC):
         supported; OS backends override to reflect what's actually installed."""
         return {t: True for t in TOOL_NAMES}
 
+    def _click_visual(self, label: str) -> str | None:
+        """The vision spine (Phase 2): screenshot → local vision model →
+        capture-px point → coordinate click. The rung that works on apps
+        accessibility can't see (Chrome/Chromium). Returns a result message, or
+        None when the vision lane is unconfigured, the capture failed, or the
+        model didn't locate the element — the caller then reports an honest
+        can't-click. Cross-OS by construction: it composes this backend's own
+        screenshot() and mouse_click() (whose coords are capture px, mapped by
+        hands.coords using the geometry the screenshot just recorded)."""
+        from ..vision import VisionLocator
+        locator = VisionLocator.from_env()
+        if locator is None:
+            return None
+        try:
+            msg = self.screenshot("windytalk_vision_locate.png")
+        except Exception:  # noqa: BLE001 — no capture, no vision lane
+            return None
+        # every backend returns exactly "Saved screenshot to <path>"
+        path = msg.rsplit("Saved screenshot to ", 1)[-1].strip()
+        hit = locator.locate(path, label)
+        if hit is None:
+            return None
+        self.mouse_click(hit[0], hit[1])
+        return f"Clicked {label!r} (located visually at capture point {hit})"
+
     def _map_capture_point(self, x: int, y: int) -> tuple[int, int]:
         """Map a mouse_click coordinate from capture space (pixels of the most
         recent screenshot — what a vision model reasons in) to the pointer's

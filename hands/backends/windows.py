@@ -244,7 +244,11 @@ class WindowsBackend(HandsBackend):
             r = _ps(script, timeout=15)
         except Exception:
             r = "notfound"
-        return f"Clicked {label!r}" if "clicked" in r else f"Couldn't find a clickable element named {label!r}."
+        if "clicked" in r:
+            return f"Clicked {label!r}"
+        # UIA couldn't see it (Chrome, canvas UI) → the vision spine (Phase 2).
+        return (self._click_visual(label)
+                or f"Couldn't find a clickable element named {label!r}.")
 
     # -- screenshot / shell ----------------------------------------------------
 

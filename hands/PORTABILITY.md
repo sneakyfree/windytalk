@@ -96,6 +96,28 @@ macOS where Retina captures are 2x points). No screenshot on record → identity
 and go through `_click_logical`, bypassing the mapping. Single-monitor
 assumption in v1.
 
+## The click ladder + vision spine (GAP_CLOSING_PLAN Phase 2)
+
+`click_element` is a ladder, cheapest-first:
+
+1. **AT-SPI fast lane** — find by label in the active app's tree (budget sized
+   for web documents) and run its most click-like named action; action names
+   vary by toolkit (`click`/`press`/`jump`/`activate`…), so a recognized name
+   is preferred over blind action 0.
+2. **Found but not actionable** — click the center of its extents (already
+   logical; bypasses capture mapping). Extents that look window-relative
+   (GTK4-on-Wayland reports 0,0) are rejected rather than clicked.
+3. **Vision spine** — screenshot → local vision model → capture-px point →
+   `mouse_click` (which maps px → logical). This is the ONLY rung that works on
+   Chrome/Chromium, which are invisible to AT-SPI and can't be woken at
+   runtime. All three backends share this rung (`HandsBackend._click_visual`).
+
+The locator (`hands/vision.py`) speaks OpenAI-compatible chat with an image
+attachment — point it at the local 5090 model (llama.cpp/vLLM) via
+`WINDYTALK_VISION_URL` (+ `_KEY`, `_MODEL`). Unset = the lane doesn't exist and
+capabilities say so. The model must answer `{"found":true,"x":..,"y":..}` in
+image pixels; off-image answers are rejected, never clamped into a click.
+
 ## Functional capability probes (Phase 0 #2)
 
 On Linux, `capabilities()` no longer equates binary presence with function —
