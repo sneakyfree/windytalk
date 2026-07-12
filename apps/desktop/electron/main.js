@@ -32,12 +32,26 @@ import { LkgStore } from "../dist/electron/control/lkg.js";
 import { removeHeartbeat } from "../dist/electron/control/heartbeat.js";
 import { updateConfigured } from "../dist/electron/control/update-key.js";
 import { GithubReleasesSource } from "../dist/electron/control/ghsource.js";
+import { launchBundledHands } from "../dist/electron/control/hands-launcher.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// Pick the native display platform (Wayland on GNOME/KDE-Wayland, X11 on X11)
+// instead of Chromium's X11 default — without this, a stock GNOME-Wayland
+// session with no Xwayland $DISPLAY exits with "Missing X server" before
+// ready (found live on OC3 packaging the P4a AppImage).
+app.commandLine.appendSwitch("ozone-platform-hint", "auto");
+
 const DEMO = process.env.WINDYTALK_DEMO || "";
 const SHOT = process.env.WINDYTALK_SHOT || "";
 const HANDS_URL = process.env.WINDYTALK_HANDS_URL || "http://127.0.0.1:8781";
-const HANDS_TOKEN = process.env.WINDYTALK_HANDS_TOKEN || "";
+// Packaged installs spawn the BUNDLED hands surface with the payload's frozen
+// python (fat-installer doctrine — never the machine's python); dev checkouts
+// have no payload, launch is null, and the env-token dev flow is unchanged.
+const handsLaunch = launchBundledHands(process.resourcesPath, {
+  log: (m) => console.log(`[hands-launcher] ${m}`),
+});
+const HANDS_TOKEN = handsLaunch?.token || process.env.WINDYTALK_HANDS_TOKEN || "";
 
 let mainWindow = null;
 let configStore = null; // the hands proxy gates on safe mode (hands off as a unit)
@@ -488,4 +502,14 @@ app.whenReady().then(async () => {
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
+});
+
+// The bundled hands surface lives and dies with the app — never leave a
+// keyboard/mouse-capable loopback server running after quit.
+app.on("will-quit", () => {
+  try {
+    handsLaunch?.child.kill();
+  } catch {
+    // already gone
+  }
 });
