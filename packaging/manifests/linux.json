@@ -37,12 +37,17 @@
     "xdg-open": { "provided_by": "system-extra", "role": "open_url / open_app fallback — xdg-utils shell script present on every freedesktop desktop; static-bundling deferred (it shells out to desktop-specific openers anyway)." },
     "xdotool": { "provided_by": "system-extra", "role": "X11 keyboard+mouse — standard on X11 desktops; ydotool (bundled) covers X11 too, so this is a redundant rung. Static build needs libX11/libXtst, deferred." },
     "gtk-launch": { "provided_by": "system-extra", "role": "desktop-file launcher; present on GTK desktops; xdg-open covers when absent" },
-    "bash": { "provided_by": "os-builtin", "role": "run_shell tool; present on every desktop Linux" }
+    "bash": { "provided_by": "os-builtin", "role": "run_shell tool; present on every desktop Linux" },
+    "portal": {
+      "provided_by": "os-builtin",
+      "role": "NOT a binary: the org.freedesktop.portal.RemoteDesktop D-Bus service (xdg-desktop-portal + desktop backend), reached via gi — the SANCTIONED GNOME-Wayland pointer (Phase 1; Mutter ignores ydotool's virtual pointer). Ships with every GNOME/KDE desktop. First use pops a one-time 'allow remote control' grant, remembered via persist_mode=2 + restore token (~/.windytalk/portal_restore_token) — a first-run wizard step (Phase 4)."
+    }
   },
   "coverage_matrix": {
     "input_x11": ["xdotool (bundled)", "ydotool (bundled)"],
-    "input_wayland_gnome_kde": ["ydotool + ydotoold (bundled) — the ONLY thing that works here; this is why ydotoold must ship"],
-    "input_wayland_wlroots": ["ydotool (bundled)", "wtype (bundled)"],
+    "keyboard_wayland_gnome_kde": ["ydotool + ydotoold (bundled) — the ONLY keyboard that works here; this is why ydotoold must ship"],
+    "pointer_wayland_gnome": ["RemoteDesktop portal (os-builtin) — Mutter ignores ydotool's virtual POINTER (proven 5K + 1080p), so the portal is the only honest pointer; needs the one-time grant"],
+    "input_wayland_wlroots": ["ydotool (bundled)", "wtype (bundled)", "portal where the compositor provides RemoteDesktop"],
     "screenshot_x11": ["scrot (bundled)", "gnome-screenshot (bundled)"],
     "screenshot_gnome_wayland": ["gnome-screenshot (bundled)"],
     "screenshot_kde_wayland": ["spectacle (system — KDE default install)"],

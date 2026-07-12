@@ -22,6 +22,7 @@ import shutil
 import subprocess
 from urllib.parse import quote_plus
 
+from ..coords import geometry_for
 from .base import FocusInfo, HandsBackend, Mechanism, focus_guard, run_chain
 
 _APP_ALIASES = {
@@ -118,6 +119,20 @@ def _quartz_scroll(amount: int) -> None:
     import Quartz
     ev = Quartz.CGEventCreateScrollWheelEvent(None, Quartz.kCGScrollEventUnitLine, 1, int(amount))
     Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+
+
+def _logical_size() -> tuple[int, int] | None:
+    """Screen size in POINTS — the space cliclick/Quartz speak. On Retina the
+    screencapture PNG is 2x this, which is exactly the mapping bug the capture
+    geometry kills (a vision model's pixel coords would land at half-screen)."""
+    try:
+        out = _osa('tell application "Finder" to get bounds of window of desktop')
+        parts = [int(p.strip()) for p in out.split(",")]
+        if len(parts) == 4 and parts[2] > 0 and parts[3] > 0:
+            return parts[2], parts[3]
+    except Exception:  # noqa: BLE001 — unknown size just means identity mapping
+        pass
+    return None
 
 
 def _focused_window() -> FocusInfo | None:
@@ -238,11 +253,12 @@ class MacOSBackend(HandsBackend):
         return f"Pressed {combo}"
 
     def mouse_click(self, x: int, y: int, button: str = "left") -> str:
+        lx, ly = self._map_capture_point(x, y)  # capture px (2x on Retina) → points
         verb = "rc" if button == "right" else "c"  # right-click / left-click
         run_chain([
             Mechanism("cliclick", lambda: _which("cliclick"),
-                      lambda: _cliclick(f"{verb}:{int(x)},{int(y)}")),
-            Mechanism("quartz", _quartz_available, lambda: _quartz_click(x, y, button)),
+                      lambda: _cliclick(f"{verb}:{lx},{ly}")),
+            Mechanism("quartz", _quartz_available, lambda: _quartz_click(lx, ly, button)),
         ], "mouse_click")
         return f"{button.capitalize()}-clicked at ({x}, {y})"
 
@@ -327,6 +343,9 @@ class MacOSBackend(HandsBackend):
             name += ".png"
         dest = str(shots / name)
         subprocess.run(["screencapture", "-x", dest], check=True, capture_output=True, timeout=15)
+        # Remember this capture's geometry: subsequent mouse_click coords are
+        # pixels of THIS image (2x points on Retina) and get mapped back.
+        self._last_capture = geometry_for(dest, _logical_size())
         return f"Saved screenshot to {dest}"
 
     def run_shell(self, command: str) -> str:
