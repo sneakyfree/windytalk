@@ -34,12 +34,22 @@ ingredient a red merge gate instead of a support ticket.
 
 ## The four artifacts
 
-| Artifact | Floor | Cocktail character |
-|---|---|---|
-| Windows NSIS installer (x64) | Windows 10 (2015)+ | Leanest: Electron + frozen python + our code; Windows itself provides every external tool (validated on GrantW laptop, zero bugs) |
-| macOS Universal2 .dmg | macOS 11 (2020)+ | ONE fat binary covers Intel + Apple Silicon; bundle cliclick + pyobjc-Quartz both-arch; must be signed + notarized |
-| Linux AppImage (x86_64) | glibc 2.31+ (~2020) | Fattest: frozen python + all input/screenshot tools **including ydotoold** (Ubuntu apt ships the client with NO daemon — OC3 finding); one file covers every session type |
-| Linux .deb | same | convenience twin, same payload |
+| Artifact | Floor | Cocktail character | Status |
+|---|---|---|---|
+| Windows NSIS installer (x64) | Windows 10 (2015)+ | Leanest: Electron + frozen python + our code; Windows itself provides every external tool | **P4b BUILT (135MB) + silent-install-validated on GrantW laptop** — frozen py 3.12.13 + hands import from the installed payload |
+| macOS Universal2 .dmg | macOS 11 (2020)+ | ONE fat binary; payload carries BOTH arch pythons (upstream ships no universal python) + cliclick + pyobjc-Quartz; must be signed + notarized | payload script ready; **needs a Mac to build** (OC5 Intel can host) |
+| Linux AppImage (x86_64) | glibc 2.31+ (~2020) | Fattest: frozen python + input/screenshot tools **including ydotoold** (Ubuntu apt ships the client with NO daemon — OC3 finding); one file covers every session type | **P4a BUILT (247MB) + live-validated on OC3 GNOME-Wayland** |
+| Linux .deb | same | convenience twin, same payload | **P4a BUILT (168MB)** |
+
+**Build reproducibility.** Frozen pythons are pinned per OS in
+`packaging/python-runtime-<os>.lock` (url + sha256, release-coherent). Bundled
+Linux tools are built in old-glibc containers
+(`packaging/linux/build-tools-container.sh`), never on the dev box — Tier A
+(ydotool/ydotoold, glibc 2.31 floor, measured 2.3–2.4) and Tier B (wtype/grim,
+glibc 2.35). Installer names are locked to the update channel's naming rule by
+`test/builder-config.test.ts`. Windows/Linux installers cross-build on Linux
+(NSIS via the `electronuserland/builder:wine` container, `--userns=keep-id` for
+rootless podman write access); the Mac dmg must build on macOS.
 
 **The ancient-Windows honesty:** old *hardware* (~2008+) is fully supported via
 Windows 10. Dead *OSes* (XP/Vista/7/8) are deliberately excluded — every modern

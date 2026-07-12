@@ -11,6 +11,7 @@
     "later": "arm64 build from the same manifest"
   },
   "one_package_covers": "Wayland + X11 + GNOME + KDE + wlroots in a SINGLE package. The runtime fallback chains (hands/backends/base.py run_chain) pick the working tool live per action — builds are never split by session type, because the session can change under us at the login screen.",
+  "tool_provenance": "Bundled tools are built in old-glibc containers (packaging/linux/build-tools-container.sh), never on the dev box. TWO tiers by dependency reality: Tier A ydotool+ydotoold on ubuntu:20.04 (glibc 2.31 floor; measured 2.3-2.4) = the GNOME/KDE-Wayland input path that MATTERS; Tier B wtype+grim on ubuntu:22.04 (glibc 2.35; measured 2.34) = wlroots-only rungs needing libxkbcommon>=1.0. All four VERIFIED built 2026-07-12. gnome-screenshot/scrot/xdotool/xdg-open stay system-extra (system-present on the desktops where they apply); static-bundling them needs GTK/libX11 and is deferred, tracked here.",
   "python_extra": [
     {
       "package": "PyGObject",
@@ -20,21 +21,21 @@
     }
   ],
   "external_tools": {
-    "xdotool": { "provided_by": "bundled", "role": "X11 keyboard + mouse" },
-    "ydotool": { "provided_by": "bundled", "role": "uinput input client — works on X11 AND every Wayland compositor" },
+    "ydotool": { "provided_by": "bundled", "role": "uinput input client — works on X11 AND every Wayland compositor. Built at glibc 2.4 (Tier A, ubuntu:20.04) — runs on ~any Linux of the last 15y." },
     "ydotoold": {
       "provided_by": "bundled",
       "invoked_by_backend": false,
       "role": "uinput daemon ydotool requires. Ubuntu/Debian apt ships the CLIENT ONLY — no daemon (validated on OC3, 2026-07-11), so without bundling this, GNOME-Wayland input is dead out of the box. Installed as a system service by packaging/linux/firstrun-linux.sh."
     },
-    "wtype": { "provided_by": "bundled", "role": "wlroots virtual-keyboard typing (fails on GNOME by design — the chain pivots)" },
-    "grim": { "provided_by": "bundled", "role": "wlroots screenshot (fails on GNOME by design — the chain pivots)" },
-    "scrot": { "provided_by": "bundled", "role": "X11 screenshot" },
-    "gnome-screenshot": { "provided_by": "bundled", "role": "GNOME screenshot, works on both X11 and Wayland sessions (validated on OC3 GNOME-Wayland: real 1.37MB PNG)" },
+    "wtype": { "provided_by": "bundled", "role": "wlroots virtual-keyboard typing (fails on GNOME by design — the chain pivots). Built at glibc 2.34 (Tier B, ubuntu:22.04) — wtype needs libxkbcommon>=1.0 absent on the 2.31 floor; fine, wlroots users run modern compositors." },
+    "grim": { "provided_by": "bundled", "role": "wlroots screenshot (fails on GNOME by design — the chain pivots). Tier B, glibc 2.34." },
+    "gnome-screenshot": { "provided_by": "system-extra", "role": "GNOME screenshot, works on both X11 and Wayland (validated on OC3 GNOME-Wayland: real 1.37MB PNG). Shipped WITH every GNOME desktop — the priority target has it by default; a static build needs GTK, deferred." },
+    "scrot": { "provided_by": "system-extra", "role": "X11 screenshot — present on ~every X11 desktop; grim/gnome-screenshot cover the bundled path." },
     "spectacle": { "provided_by": "system-extra", "role": "KDE screenshot; KDE installs it by default — an extra rung when present" },
     "import": { "provided_by": "system-extra", "role": "ImageMagick X11 capture — redundant rung under scrot" },
     "flameshot": { "provided_by": "system-extra", "role": "last-resort raw capture rung" },
-    "xdg-open": { "provided_by": "bundled", "role": "open_url / open_app fallback — a portable shell script, trivially bundleable" },
+    "xdg-open": { "provided_by": "system-extra", "role": "open_url / open_app fallback — xdg-utils shell script present on every freedesktop desktop; static-bundling deferred (it shells out to desktop-specific openers anyway)." },
+    "xdotool": { "provided_by": "system-extra", "role": "X11 keyboard+mouse — standard on X11 desktops; ydotool (bundled) covers X11 too, so this is a redundant rung. Static build needs libX11/libXtst, deferred." },
     "gtk-launch": { "provided_by": "system-extra", "role": "desktop-file launcher; present on GTK desktops; xdg-open covers when absent" },
     "bash": { "provided_by": "os-builtin", "role": "run_shell tool; present on every desktop Linux" }
   },

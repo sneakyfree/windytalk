@@ -13,3 +13,7 @@ scratch/
 apps/desktop/payload/
 apps/desktop/release/
 packaging/linux/out/
+# wine/electron-builder container litter (written into the tree by the win build)
+apps/desktop/.wine/
+apps/desktop/.cache/
+apps/desktop/.npm/
