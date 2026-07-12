@@ -1,7 +1,9 @@
 {
   "appId": "ai.windstorm.windytalk",
   "productName": "WindyTalk",
-  "directories": { "output": "release" },
+  "directories": {
+    "output": "release"
+  },
   "files": [
     "electron/**/*",
     "dist/electron/**/*",
@@ -9,17 +11,25 @@
     "!dist/test/**"
   ],
   "extraResources": [
-    { "from": "payload/current", "to": "payload" }
+    {
+      "from": "payload/current",
+      "to": "payload"
+    }
   ],
   "npmRebuild": false,
   "linux": {
-    "target": ["AppImage", "deb"],
+    "target": [
+      "AppImage",
+      "deb"
+    ],
     "category": "Utility",
     "maintainer": "Windstorm Labs LLC",
     "artifactName": "windytalk-${version}-linux-x86_64.${ext}"
   },
   "win": {
-    "target": ["nsis"],
+    "target": [
+      "nsis"
+    ],
     "artifactName": "windytalk-${version}-win-x64.${ext}"
   },
   "nsis": {
@@ -27,8 +37,16 @@
     "deleteAppDataOnUninstall": false
   },
   "mac": {
-    "target": [{ "target": "dmg", "arch": ["universal"] }],
+    "target": [
+      {
+        "target": "dmg",
+        "arch": [
+          "universal"
+        ]
+      }
+    ],
     "category": "public.app-category.utilities",
-    "artifactName": "windytalk-${version}-mac-universal.${ext}"
+    "artifactName": "windytalk-${version}-mac-universal.${ext}",
+    "x64ArchFiles": "{**/payload/**,**/payload/**/.*/**}"
   }
 }
