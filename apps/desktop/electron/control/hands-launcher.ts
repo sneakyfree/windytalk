@@ -13,15 +13,28 @@ export interface HandsLaunch {
   token: string;
 }
 
-/** The payload's frozen interpreter, or null when unpackaged. */
+/**
+ * The payload's frozen interpreter, or null when unpackaged. macOS payloads
+ * carry BOTH arch runtimes (upstream publishes no universal2 python) —
+ * python-x64/ and python-arm64/ — picked by the running process's arch; a
+ * plain python/ (if a universal build ever exists) is preferred.
+ */
 export function payloadPython(
   resourcesPath: string,
   platform: NodeJS.Platform = process.platform,
+  arch: string = process.arch,
 ): string | null {
-  const p = platform === "win32"
-    ? path.join(resourcesPath, "payload", "python", "python.exe")
-    : path.join(resourcesPath, "payload", "python", "bin", "python3");
-  return fs.existsSync(p) ? p : null;
+  const base = path.join(resourcesPath, "payload");
+  const candidates = platform === "win32"
+    ? [path.join(base, "python", "python.exe")]
+    : platform === "darwin"
+      ? [
+          path.join(base, "python", "bin", "python3"),
+          path.join(base, `python-${arch === "arm64" ? "arm64" : "x64"}`, "bin", "python3"),
+        ]
+      : [path.join(base, "python", "bin", "python3")];
+  for (const p of candidates) if (fs.existsSync(p)) return p;
+  return null;
 }
 
 export function launchBundledHands(
