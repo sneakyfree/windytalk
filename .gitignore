@@ -9,3 +9,7 @@ dist/
 reference/server/*.onnx
 reference/server/*.bin
 scratch/
+# P4 installer build outputs (assembled/built, never committed)
+apps/desktop/payload/
+apps/desktop/release/
+packaging/linux/out/
