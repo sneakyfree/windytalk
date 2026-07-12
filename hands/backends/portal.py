@@ -175,6 +175,25 @@ class PortalScreenshot:
         return _do_request(bus, "Screenshot", "Screenshot", ("",), "(sa{sv})",
                            options, timeout, token)
 
+    def grant(self, timeout: float = 120.0) -> bool:
+        """The wizard's ONE interactive screenshot request (Phase 4): pops the
+        compositor's grant dialog, waits for the human, and lets the desktop
+        seed its permission store. The capture the grant produces is discarded
+        (and its file removed) — this call is about the grant, not the pixels.
+        NEVER called from the capture chain; _do_request Close()s at timeout so
+        an unattended dialog is dismissed rather than left on screen."""
+        try:
+            res = self._request({"interactive": ("b", True)}, timeout=timeout)
+            uri = str(res.get("uri") or "")
+            if uri.startswith("file://"):
+                try:
+                    Path(uri[7:]).unlink()
+                except OSError:
+                    pass
+            return True
+        except Exception:  # noqa: BLE001 — denied / timed out / no portal
+            return False
+
     def capture(self, dest: str) -> bool:
         """Full-screen capture into `dest`. The portal writes its own file
         (~/Pictures/Screenshot-N.png observed live) — copy it to `dest` and

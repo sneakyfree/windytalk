@@ -22,6 +22,7 @@ import pytest
 
 from hands.backends import linux as _lx
 from hands.backends import macos as _mac
+from hands.backends import portal as _pt
 from hands.backends import windows as _win
 from hands.backends.base import FocusInfo
 
@@ -46,6 +47,10 @@ def _no_live_desktop(monkeypatch):
     # dev's screen on a granted box like Windy 0).
     monkeypatch.setattr(_lx, "_portal_available", lambda: False)
     monkeypatch.setattr(_lx, "_portal_shot_usable", lambda: False)
+    monkeypatch.setattr(_pt.PortalPointer, "available", staticmethod(lambda: False))
+    monkeypatch.setattr(_pt.PortalScreenshot, "available", staticmethod(lambda: False))
+    monkeypatch.setattr(_pt.PortalScreenshot, "permission_granted",
+                        staticmethod(lambda: False))
     # The vision lane must never be live in tests, whatever the dev box's env
     # says — a stray WINDYTALK_VISION_URL would turn click tests into real
     # screenshots + model calls.
