@@ -40,9 +40,12 @@ def _no_live_desktop(monkeypatch):
     monkeypatch.setattr(_lx.LinuxBackend, "_focused_window", lambda self: _FAKE_FOCUS)
     monkeypatch.setattr(_mac, "_focused_window", lambda: _FAKE_FOCUS)
     monkeypatch.setattr(_win, "_focused_window", lambda: _FAKE_FOCUS)
-    # The portal probe is a REAL session-bus property read — stub it False so a
-    # capabilities() call in a test never touches the developer's live portal.
+    # The portal probes are REAL session-bus property/store reads — stub them
+    # False so a capabilities() or _capture() call in a test never touches the
+    # developer's live portal (the screenshot rung WOULD silently capture the
+    # dev's screen on a granted box like Windy 0).
     monkeypatch.setattr(_lx, "_portal_available", lambda: False)
+    monkeypatch.setattr(_lx, "_portal_shot_usable", lambda: False)
     # The vision lane must never be live in tests, whatever the dev box's env
     # says — a stray WINDYTALK_VISION_URL would turn click tests into real
     # screenshots + model calls.

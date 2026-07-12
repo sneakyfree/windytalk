@@ -206,34 +206,66 @@ def _screenshot_probe() -> bool:
         return False
 
 
+def _portal_shot_usable() -> bool:
+    """May the capture chain use the Screenshot portal rung? Requires BOTH the
+    portal on the bus AND an existing permission-store grant — a chain rung
+    must never be the thing that pops a first-use dialog (the wizard owns
+    interactive grants, Phase 4). Property/store reads only, never UI."""
+    try:
+        from .portal import PortalScreenshot
+        return PortalScreenshot.available() and PortalScreenshot.permission_granted()
+    except Exception:  # noqa: BLE001 — no gi / no bus ⇒ no portal rung
+        return False
+
+
+def _portal_capture(dest: str) -> bool:
+    from .portal import PortalScreenshot
+    return PortalScreenshot().capture(dest)
+
+
 def _capture(dest: str) -> str | None:
-    """Session-AGNOSTIC capture chain: try every tool present, in a broad order
-    that covers Wayland (grim), GNOME (gnome-screenshot, both sessions), KDE
-    (spectacle), and X11 (scrot/import), with flameshot raw-stdout as the last
-    rung. Each is verified by a real non-empty file before we accept it, so a
-    tool that runs on the wrong session (writes nothing) transparently pivots to
-    the next. Returns the name of the tool that seated, or None."""
-    for cmd in (["grim", dest],
-                ["gnome-screenshot", "-f", dest],
-                ["spectacle", "-b", "-n", "-o", dest],
-                ["scrot", "-o", dest],
-                ["import", "-window", "root", dest]):
-        if not _which(cmd[0]):
+    """Session-aware capture chain; every rung is verified by a real non-empty
+    file before we accept it, so a tool that runs on the wrong session (writes
+    nothing) transparently pivots to the next. Returns the rung that seated, or
+    None.
+
+    Order (Phase 3 #7): on Wayland the sanctioned Screenshot portal goes FIRST
+    when it's silently usable — live-measured FASTER than flameshot (0.14s
+    @1080p, 1.03s @4K) and it needs no tool binary at all. On X11 the native
+    grabbers are proven and instant, so the portal slots in as a late rung
+    before flameshot. grim stays ahead of gnome-screenshot for wlroots; it
+    fails on GNOME by design and pivots."""
+    def tool_rung(*cmd: str):
+        def run() -> bool:
+            subprocess.run(list(cmd), check=True, capture_output=True, timeout=15)
+            return Path(dest).exists() and Path(dest).stat().st_size > 0
+        return run if _which(cmd[0]) else None
+
+    def flameshot_rung() -> bool:  # writes raw bytes to stdout, not a file
+        data = subprocess.run(["flameshot", "full", "--raw"],
+                              capture_output=True, timeout=15).stdout
+        if not data:
+            return False
+        Path(dest).write_bytes(data)
+        return True
+
+    portal = ("portal", (lambda: _portal_capture(dest)) if _portal_shot_usable() else None)
+    tools = [
+        ("grim", tool_rung("grim", dest)),
+        ("gnome-screenshot", tool_rung("gnome-screenshot", "-f", dest)),
+        ("spectacle", tool_rung("spectacle", "-b", "-n", "-o", dest)),
+        ("scrot", tool_rung("scrot", "-o", dest)),
+        ("import", tool_rung("import", "-window", "root", dest)),
+    ]
+    flameshot = ("flameshot", flameshot_rung if _which("flameshot") else None)
+    rungs = [*tools, portal, flameshot] if _on_x11() else [portal, *tools, flameshot]
+    for name, attempt in rungs:
+        if attempt is None:
             continue
         try:
-            subprocess.run(cmd, check=True, capture_output=True, timeout=15)
-            if Path(dest).exists() and Path(dest).stat().st_size > 0:
-                return cmd[0]
+            if attempt():
+                return name
         except Exception:  # noqa: BLE001 — a failed rung -> try the next
-            pass
-    if _which("flameshot"):  # last resort: raw bytes to stdout
-        try:
-            data = subprocess.run(["flameshot", "full", "--raw"],
-                                  capture_output=True, timeout=15).stdout
-            if data:
-                Path(dest).write_bytes(data)
-                return "flameshot"
-        except Exception:  # noqa: BLE001
             pass
     return None
 

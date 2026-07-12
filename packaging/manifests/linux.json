@@ -33,7 +33,7 @@
     "scrot": { "provided_by": "system-extra", "role": "X11 screenshot — present on ~every X11 desktop; grim/gnome-screenshot cover the bundled path." },
     "spectacle": { "provided_by": "system-extra", "role": "KDE screenshot; KDE installs it by default — an extra rung when present" },
     "import": { "provided_by": "system-extra", "role": "ImageMagick X11 capture — redundant rung under scrot" },
-    "flameshot": { "provided_by": "system-extra", "role": "last-resort raw capture rung" },
+    "flameshot": { "provided_by": "system-extra", "role": "last-resort raw capture rung. Phase 3 decision: NOT bundled despite the plan's original 'flameshot bundled as backup' — live probing showed the Screenshot portal answers silently/faster on GNOME 46+50, and on GNOME-Wayland flameshot is NOT an independent backup: it exits through the same compositor permission door the portal rung uses. Bundling its Qt AppImage would add tens of MB and zero capability beyond portal (os-builtin) + grim (bundled) + the native rungs. Revisit only if a real fleet box surfaces where flameshot works and every other rung fails." },
     "xdg-open": { "provided_by": "system-extra", "role": "open_url / open_app fallback — xdg-utils shell script present on every freedesktop desktop; static-bundling deferred (it shells out to desktop-specific openers anyway)." },
     "xdotool": { "provided_by": "system-extra", "role": "X11 keyboard+mouse — standard on X11 desktops; ydotool (bundled) covers X11 too, so this is a redundant rung. Static build needs libX11/libXtst, deferred." },
     "gtk-launch": { "provided_by": "system-extra", "role": "desktop-file launcher; present on GTK desktops; xdg-open covers when absent" },
@@ -41,6 +41,10 @@
     "portal": {
       "provided_by": "os-builtin",
       "role": "NOT a binary: the org.freedesktop.portal.RemoteDesktop D-Bus service (xdg-desktop-portal + desktop backend), reached via gi — the SANCTIONED GNOME-Wayland pointer (Phase 1; Mutter ignores ydotool's virtual pointer). Ships with every GNOME/KDE desktop. First use pops a one-time 'allow remote control' grant, remembered via persist_mode=2 + restore token (~/.windytalk/portal_restore_token) — a first-run wizard step (Phase 4)."
+    },
+    "portal-screenshot": {
+      "provided_by": "os-builtin",
+      "role": "NOT a binary: org.freedesktop.portal.Screenshot via gi — the sanctioned capture on Wayland and a late rung on X11 (Phase 3). Live-measured silent + faster than flameshot (0.14s @1080p / 1.03s @4K) once the permission store's non-sandboxed entry says yes; the chain only uses it when that grant is already recorded (never pops UI — the wizard owns the interactive first grant, Phase 4)."
     }
   },
   "coverage_matrix": {
@@ -48,10 +52,10 @@
     "keyboard_wayland_gnome_kde": ["ydotool + ydotoold (bundled) — the ONLY keyboard that works here; this is why ydotoold must ship"],
     "pointer_wayland_gnome": ["RemoteDesktop portal (os-builtin) — Mutter ignores ydotool's virtual POINTER (proven 5K + 1080p), so the portal is the only honest pointer; needs the one-time grant"],
     "input_wayland_wlroots": ["ydotool (bundled)", "wtype (bundled)", "portal where the compositor provides RemoteDesktop"],
-    "screenshot_x11": ["scrot (bundled)", "gnome-screenshot (bundled)"],
-    "screenshot_gnome_wayland": ["gnome-screenshot (bundled)"],
-    "screenshot_kde_wayland": ["spectacle (system — KDE default install)"],
-    "screenshot_wlroots_wayland": ["grim (bundled)"]
+    "screenshot_x11": ["scrot / gnome-screenshot / import (system-extra — some present on ~every X11 desktop)", "Screenshot portal (os-builtin, late rung)"],
+    "screenshot_gnome_wayland": ["Screenshot portal (os-builtin, FIRST — Phase 3)", "gnome-screenshot (system-extra where present)", "flameshot (system-extra last resort)"],
+    "screenshot_kde_wayland": ["Screenshot portal (os-builtin, FIRST)", "spectacle (system — KDE default install)"],
+    "screenshot_wlroots_wayland": ["Screenshot portal (os-builtin, FIRST where implemented)", "grim (bundled)"]
   },
   "first_run_root_step": "ONE sudo prompt in the wizard runs packaging/linux/firstrun-linux.sh: installs the uinput udev rule + the windytalk-ydotoold system service, then verifies the socket is alive. Everything else is user-level.",
   "sandboxed_formats_rejected": "Flatpak/Snap deliberately NOT offered for the hands payload — their sandboxes block uinput/desktop control, which is the whole product."
