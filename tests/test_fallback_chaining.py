@@ -144,7 +144,7 @@ def test_linux_type_text_pivots_when_primary_tool_dead(monkeypatch):
     monkeypatch.setattr(lx, "_ydotool", lambda *a, **k: ran.append(("ydotool", a)))
 
     out = lx.LinuxBackend().type_text("hello")
-    assert out == "Typed 5 characters"
+    assert out.startswith("Typed 5 characters into "), out  # focus label from the conftest stub
     assert ran and ran[0][0] == "ydotool", "must have pivoted from the dead xdotool to ydotool"
 
 
@@ -188,7 +188,7 @@ def test_macos_type_pivots_from_cliclick_to_osascript(monkeypatch):
     monkeypatch.setattr(mac, "_cliclick", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("cliclick absent")))
     monkeypatch.setattr(mac, "_osa", lambda script, **k: ran.append(script) or "")
     out = mac.MacOSBackend().type_text("hi there")
-    assert out == "Typed 8 characters"
+    assert out.startswith("Typed 8 characters into "), out
     assert ran and "keystroke" in ran[0], "must have typed via osascript keystroke"
 
 
@@ -329,7 +329,7 @@ def test_chain_skips_doomed_ydotool_and_never_runs_it(monkeypatch):
     monkeypatch.setattr(lx, "_ydotool", lambda *a, **k: ydotool_ran.append(a))
     monkeypatch.setattr(lx, "_wtype", lambda *a, **k: wtype_ran.append(a))
     out = lx.LinuxBackend().type_text("hi")
-    assert out == "Typed 2 characters"
+    assert out.startswith("Typed 2 characters into "), out
     assert ydotool_ran == [], "a doomed ydotool must be skipped, never executed"
     assert wtype_ran, "typing pivoted straight to wtype"
 
