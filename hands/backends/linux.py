@@ -19,8 +19,27 @@ from urllib.parse import quote_plus
 
 from .base import HandsBackend, Mechanism, UnsupportedTool, run_chain
 
-_YDOTOOL_SOCKET = os.environ.get("YDOTOOL_SOCKET", "/run/user/1000/.ydotool_socket")
-_YENV = {**os.environ, "YDOTOOL_SOCKET": _YDOTOOL_SOCKET}
+
+def _ydotool_socket() -> str:
+    """The ydotoold socket path. Defaults to the CURRENT user's runtime dir —
+    never a hardcoded uid 1000 (wrong on any box where the login user isn't
+    1000, which silently broke ydotool there)."""
+    env = os.environ.get("YDOTOOL_SOCKET")
+    if env:
+        return env
+    uid = os.getuid() if hasattr(os, "getuid") else 1000
+    return f"/run/user/{uid}/.ydotool_socket"
+
+
+def _ydotool_available() -> bool:
+    """ydotool works ONLY with a running ydotoold (socket present) OR direct
+    /dev/uinput access. Without either it crashes ~1.5 s in ('failed to open
+    uinput device'), so treat it as absent and pivot instantly to wtype/xdotool
+    instead of eating the latency + a scary error on every keystroke (found on a
+    real Ubuntu box with no ydotoold)."""
+    if _which("ydotool") is None:
+        return False
+    return os.path.exists(_ydotool_socket()) or os.access("/dev/uinput", os.W_OK)
 
 _KEYCODES = {
     "esc": 1, "escape": 1, "1": 2, "2": 3, "3": 4, "4": 5, "5": 6, "6": 7,
@@ -86,7 +105,8 @@ def _input_order() -> list[str]:
 
 
 def _ydotool(*args: str, timeout: float = 10) -> None:
-    subprocess.run(["ydotool", *args], env=_YENV, check=True,
+    env = {**os.environ, "YDOTOOL_SOCKET": _ydotool_socket()}
+    subprocess.run(["ydotool", *args], env=env, check=True,
                    capture_output=True, timeout=timeout)
 
 
@@ -124,7 +144,7 @@ class LinuxBackend(HandsBackend):
         # Honest per-tool probe: report what this box can actually do, so the agent
         # gets a graceful `unsupported` instead of a raw exception (PORTABILITY.md /
         # GET /capabilities promise this reflects reality, not an assumption).
-        input_ok = any(_which(t) for t in ("xdotool", "ydotool", "wtype"))
+        input_ok = _which("xdotool") is not None or _which("wtype") is not None or _ydotool_available()
         has_atspi = False
         try:  # AT-SPI drives read/click; absent gi means blind
             import gi  # noqa: F401
@@ -149,7 +169,7 @@ class LinuxBackend(HandsBackend):
         builders = {
             "xdotool": Mechanism("xdotool", lambda: _which("xdotool"),
                                  lambda: _xdotool("type", "--clearmodifiers", "--", text)),
-            "ydotool": Mechanism("ydotool", lambda: _which("ydotool"),
+            "ydotool": Mechanism("ydotool", _ydotool_available,
                                  lambda: _ydotool("type", "--", text)),
             # wtype: the Wayland virtual-keyboard typer (wlroots compositors).
             "wtype": Mechanism("wtype", lambda: _which("wtype"), lambda: _wtype(text)),
@@ -185,7 +205,7 @@ class LinuxBackend(HandsBackend):
 
         builders = {
             "xdotool": Mechanism("xdotool", lambda: _which("xdotool"), xdotool_run),
-            "ydotool": Mechanism("ydotool", lambda: _which("ydotool"), ydotool_run),
+            "ydotool": Mechanism("ydotool", _ydotool_available, ydotool_run),
             "wtype": Mechanism("wtype", lambda: _which("wtype"), wtype_run),
         }
         return [builders[k] for k in _input_order() if k in builders]
@@ -205,7 +225,7 @@ class LinuxBackend(HandsBackend):
         # wtype has no pointer control; the mouse chain is xdotool/ydotool only.
         builders = {
             "xdotool": Mechanism("xdotool", lambda: _which("xdotool"), xdotool_run),
-            "ydotool": Mechanism("ydotool", lambda: _which("ydotool"), ydotool_run),
+            "ydotool": Mechanism("ydotool", _ydotool_available, ydotool_run),
         }
         return [builders[k] for k in _input_order() if k in builders]
 
@@ -220,7 +240,7 @@ class LinuxBackend(HandsBackend):
 
         builders = {
             "xdotool": Mechanism("xdotool", lambda: _which("xdotool"), xdotool_run),
-            "ydotool": Mechanism("ydotool", lambda: _which("ydotool"), ydotool_run),
+            "ydotool": Mechanism("ydotool", _ydotool_available, ydotool_run),
         }
         return [builders[k] for k in _input_order() if k in builders]
 
