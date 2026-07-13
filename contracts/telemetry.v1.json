@@ -155,7 +155,11 @@
             "set_wake_mode",
             "set_autonomy",
             "reset_to_defaults",
-            "apply_update"
+            "apply_update",
+            "get_account",
+            "get_billing_summary",
+            "open_account_portal",
+            "logout_account"
           ]
         },
         "tier_outcome": {
