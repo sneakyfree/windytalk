@@ -6,7 +6,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 echo "== ruff (lint — all python modules) =="
-ruff check engine brains agents hands auth telemetry wakeword tests
+ruff check engine brains agents hands auth telemetry wakeword gauntlet tests
 
 echo "== pytest (unit tests; lazy CUDA imports, no GPU needed) =="
 python3 -m pytest tests/ -q

@@ -113,10 +113,17 @@ assumption in v1.
    runtime. All three backends share this rung (`HandsBackend._click_visual`).
 
 The locator (`hands/vision.py`) speaks OpenAI-compatible chat with an image
-attachment — point it at the local 5090 model (llama.cpp/vLLM) via
-`WINDYTALK_VISION_URL` (+ `_KEY`, `_MODEL`). Unset = the lane doesn't exist and
-capabilities say so. The model must answer `{"found":true,"x":..,"y":..}` in
-image pixels; off-image answers are rejected, never clamped into a click.
+attachment — point it at the local 5090 model (ollama/llama.cpp/vLLM) via
+`WINDYTALK_VISION_URL` (+ `_KEY`, `_MODEL`, `_TIMEOUT`). Unset = the lane
+doesn't exist and capabilities say so. The model answers
+`{"found":true,"x":..,"y":..}` in **normalized 0–1000 coordinates** — live
+Phase-5 testing (qwen3-vl:32b on ollama, the real 5090 lane) proved absolute
+pixels are unusable: the serving stack resizes images before the model sees
+them, so pixel answers arrive in the resized space (systematic ~0.53×/0.93×
+miss). Normalized answers are resize-invariant (4/5 ground-truth targets at
+2–5 px error). Out-of-scale answers are rejected, never clamped into a click.
+Thinking models also need `max_tokens` headroom (2000; 200 returned empty
+content every time) — both findings live-measured 2026-07-12.
 
 ## The capture chain + sense doctrine (GAP_CLOSING_PLAN Phase 3)
 

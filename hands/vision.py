@@ -9,9 +9,10 @@ brains/mind.py, so llama.cpp / vLLM / the Mind gateway all fit unchanged.
 
 Configuration (all env; unset URL = the vision lane simply doesn't exist and
 capabilities stay honest about it):
-  WINDYTALK_VISION_URL    — OpenAI-compatible base, e.g. http://veron:8000/v1
-  WINDYTALK_VISION_KEY    — bearer token if the server wants one
-  WINDYTALK_VISION_MODEL  — served model name (default: whatever `default` maps to)
+  WINDYTALK_VISION_URL     — OpenAI-compatible base, e.g. http://10.10.0.6:11434/v1
+  WINDYTALK_VISION_KEY     — bearer token if the server wants one
+  WINDYTALK_VISION_MODEL   — served model name (default: whatever `default` maps to)
+  WINDYTALK_VISION_TIMEOUT — per-request seconds (default 90: cold load + thinking)
 
 The locator NEVER raises into a click path: any transport/parse fault returns
 None ("not located"), and the caller reports an honest can't-click. Coordinates
@@ -30,23 +31,49 @@ from pathlib import Path
 from .coords import png_size
 
 DEFAULT_MODEL = "default"
-DEFAULT_TIMEOUT = 30.0
+DEFAULT_TIMEOUT = 90.0   # cold model load + a thinking pass both fit (live: ~30s)
+# Thinking models (live-measured: qwen3-vl:32b on ollama) spend their budget in
+# a separate reasoning channel BEFORE emitting content, and max_tokens counts
+# THINKING tokens too — 200 returned content='' every time, 2000 still starved
+# long deliberations (41s of thought, empty answer). Non-thinkers stop early,
+# so generous headroom costs nothing. The SERVER must also allow a context
+# window that fits image+prompt+thinking+answer: ollama's 4096 default
+# truncated every long locate until the served model carried num_ctx 16384
+# (the windy-locator derived model on the 5090).
+MAX_TOKENS = 8000
 
+# NORMALIZED 0-1000 bounding box, never absolute pixels. Live-measured
+# (qwen3-vl:32b via ollama, 2026-07-12): the serving stack resizes the image
+# before the model sees it (~1024x1024, aspect NOT preserved), so pixel answers
+# come back in the RESIZED space — a systematic ~0.53x/0.93x error that missed
+# 4/5 ground-truth targets. Normalized coordinates are resize-invariant on any
+# stack (ollama/vLLM/llama.cpp preprocess differently): same targets, 4/5 hits
+# at 2-5px error. A BOX beats a point: asked for a center directly the model
+# returned corner-biased points (a live click nearly missed a 420px-wide
+# button); the midpoint of its box is dead-center. (Qwen-VL grounding is
+# natively normalized boxes anyway.)
 _PROMPT = (
-    "You are a precise UI element locator. The attached screenshot is {w}x{h} "
-    "pixels. Locate this element: {target}\n"
-    'Reply with ONLY a JSON object, no other text: {{"found": true, "x": <int>, '
-    '"y": <int>}} where x,y is the CENTER of the element in image pixels '
-    '(0,0 = top-left). If the element is not visible, reply {{"found": false}}.'
+    "You are a precise UI element locator. Locate this element in the attached "
+    "screenshot: {target}\n"
+    "Reply with ONLY a JSON object, no other text: "
+    '{{"found": true, "x1": <int>, "y1": <int>, "x2": <int>, "y2": <int>}} — '
+    "the element's tight bounding box in NORMALIZED coordinates from 0 to "
+    "1000 (x=0 is the left edge, x=1000 the right edge, y=0 the top, y=1000 "
+    'the bottom). If the element is not visible, reply {{"found": false}}.'
 )
 
 
 class VisionLocator:
     def __init__(self, base_url: str, api_key: str = "",
-                 model: str | None = None, timeout: float = DEFAULT_TIMEOUT) -> None:
+                 model: str | None = None, timeout: float | None = None) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model or os.environ.get("WINDYTALK_VISION_MODEL", DEFAULT_MODEL)
+        if timeout is None:
+            try:
+                timeout = float(os.environ.get("WINDYTALK_VISION_TIMEOUT", ""))
+            except ValueError:
+                timeout = DEFAULT_TIMEOUT
         self.timeout = timeout
 
     @classmethod
@@ -87,10 +114,9 @@ class VisionLocator:
             body = {
                 "model": self.model,
                 "temperature": 0,
-                "max_tokens": 200,
+                "max_tokens": MAX_TOKENS,
                 "messages": [{"role": "user", "content": [
-                    {"type": "text",
-                     "text": _PROMPT.format(w=size[0], h=size[1], target=target)},
+                    {"type": "text", "text": _PROMPT.format(target=target)},
                     {"type": "image_url",
                      "image_url": {"url": f"data:image/png;base64,{b64}"}},
                 ]}],
@@ -102,9 +128,11 @@ class VisionLocator:
 
 
 def _parse_point(raw: str, size: tuple[int, int]) -> tuple[int, int] | None:
-    """Extract {"found":true,"x":..,"y":..} from model output that may wrap the
-    JSON in prose or a markdown fence. Off-image coordinates are rejected — a
-    hallucinated point must not become a click."""
+    """Extract the normalized 0-1000 bounding box from model output that may
+    wrap the JSON in prose or a markdown fence; return the box CENTER mapped to
+    capture pixels of `size`. A bare x/y point (older/other models) is accepted
+    as a degenerate box. Out-of-scale or inverted boxes are rejected — a
+    hallucinated shape must not become a click."""
     for m in re.finditer(r"\{[^{}]*\}", raw, re.S):
         try:
             doc = json.loads(m.group(0))
@@ -113,10 +141,17 @@ def _parse_point(raw: str, size: tuple[int, int]) -> tuple[int, int] | None:
         if not isinstance(doc, dict) or not doc.get("found"):
             continue
         try:
-            x, y = int(doc["x"]), int(doc["y"])
+            if "x1" in doc:
+                x1, y1 = int(doc["x1"]), int(doc["y1"])
+                x2, y2 = int(doc["x2"]), int(doc["y2"])
+            else:
+                x1 = x2 = int(doc["x"])
+                y1 = y2 = int(doc["y"])
         except (KeyError, TypeError, ValueError):
             continue
-        if 0 <= x < size[0] and 0 <= y < size[1]:
-            return x, y
-        return None  # found-but-off-image: refuse rather than clamp a hallucination
+        if not (0 <= x1 <= x2 <= 1000 and 0 <= y1 <= y2 <= 1000):
+            return None  # off-scale/inverted: refuse rather than repair a hallucination
+        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+        return (min(size[0] - 1, round(cx * size[0] / 1000)),
+                min(size[1] - 1, round(cy * size[1] / 1000)))
     return None

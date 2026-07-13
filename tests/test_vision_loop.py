@@ -21,17 +21,30 @@ from hands.coords import CaptureGeometry
 from hands.vision import VisionLocator, _parse_point
 
 # ============ the locator: parsing, payload, fault behavior ======================
+# The model answers in NORMALIZED 0-1000 coordinates (resize-invariant — the
+# serving stack resizes images before the model sees them, live-measured on
+# ollama/qwen3-vl); _parse_point maps them to capture pixels.
 
 SIZE = (1920, 1080)
 
 
-def test_parse_strict_json():
-    assert _parse_point('{"found": true, "x": 100, "y": 200}', SIZE) == (100, 200)
+def test_parse_box_center_maps_normalized_to_capture_px():
+    # a box spanning 400-600 x 400-600 normalized -> its center = image center
+    raw = '{"found": true, "x1": 400, "y1": 400, "x2": 600, "y2": 600}'
+    assert _parse_point(raw, SIZE) == (960, 540)
+    # the far corner maps INSIDE the image, never one past it
+    raw = '{"found": true, "x1": 1000, "y1": 1000, "x2": 1000, "y2": 1000}'
+    assert _parse_point(raw, SIZE) == (1919, 1079)
+
+
+def test_parse_bare_point_accepted_as_degenerate_box():
+    assert _parse_point('{"found": true, "x": 500, "y": 500}', SIZE) == (960, 540)
 
 
 def test_parse_json_wrapped_in_prose_and_fences():
-    raw = 'Sure! Here it is:\n```json\n{"found": true, "x": 5, "y": 7}\n```\nDone.'
-    assert _parse_point(raw, SIZE) == (5, 7)
+    raw = ('Sure! Here it is:\n```json\n{"found": true, "x1": 0, "y1": 0, '
+           '"x2": 10, "y2": 14}\n```\nDone.')
+    assert _parse_point(raw, (1000, 1000)) == (5, 7)
 
 
 def test_parse_not_found_and_garbage():
@@ -40,10 +53,12 @@ def test_parse_not_found_and_garbage():
     assert _parse_point('{"x": 5, "y": 7}', SIZE) is None, "found:true is required"
 
 
-def test_parse_rejects_off_image_hallucination():
-    # a hallucinated point must NOT be clamped into a click
+def test_parse_rejects_off_scale_or_inverted_hallucination():
+    # outside the 0-1000 scale, or an inverted box, must NOT become a click
     assert _parse_point('{"found": true, "x": 5000, "y": 10}', SIZE) is None
     assert _parse_point('{"found": true, "x": -3, "y": 10}', SIZE) is None
+    raw = '{"found": true, "x1": 600, "y1": 100, "x2": 400, "y2": 200}'
+    assert _parse_point(raw, SIZE) is None, "x2 < x1 is a hallucinated shape"
 
 
 def test_locator_payload_shape(tmp_path, monkeypatch):
@@ -53,13 +68,15 @@ def test_locator_payload_shape(tmp_path, monkeypatch):
 
     def fake_post(self, body):
         seen.update(body)
-        return '{"found": true, "x": 10, "y": 20}'
+        return '{"found": true, "x": 500, "y": 500}'
     monkeypatch.setattr(VisionLocator, "_post", fake_post)
     loc = VisionLocator("http://model:8000/v1", model="qwen-vl")
-    assert loc.locate(shot, "the Send button") == (10, 20)
+    assert loc.locate(shot, "the Send button") == (400, 300)  # center of 800x600
     assert seen["model"] == "qwen-vl" and seen["temperature"] == 0
+    assert seen["max_tokens"] >= 8000, \
+        "thinking models return content='' on small budgets (live-measured)"
     content = seen["messages"][0]["content"]
-    assert "800x600" in content[0]["text"] and "the Send button" in content[0]["text"]
+    assert "NORMALIZED" in content[0]["text"] and "the Send button" in content[0]["text"]
     assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
 
 
@@ -110,12 +127,14 @@ class _SpineBackend(win.WindowsBackend):
 def test_click_visual_full_spine_with_mapping(tmp_path, monkeypatch):
     monkeypatch.setenv("WINDYTALK_VISION_URL", "http://model/v1")
     monkeypatch.setattr(VisionLocator, "_post",
-                        lambda self, body: '{"found": true, "x": 600, "y": 300}')
+                        lambda self, body: '{"found": true, "x": 600, "y": 600}')
     b = _SpineBackend(tmp_path)
     out = b._click_visual("Subscribe button")
     assert out and "located visually" in out
+    # normalized 600,600 -> capture px (600, 300) of the 1000x500 shot -> the
+    # 2x geometry maps that to logical (300, 150)
     assert b.clicks == [(300, 150)], \
-        "vision returns CAPTURE px; the click maps them to logical via the fresh geometry"
+        "normalized -> capture px -> logical via the fresh geometry"
 
 
 def test_click_visual_none_when_unconfigured(tmp_path, monkeypatch):
