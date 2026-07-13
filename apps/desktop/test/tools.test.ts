@@ -193,6 +193,17 @@ test("dispatch: unknown tool vs contract-but-unbuilt tool are distinct honest er
   fs.rmSync(h.dir, { recursive: true, force: true });
 });
 
+test("account/billing knobs are served but forced-honest 'unsupported' until wired", async () => {
+  const h = harness();
+  for (const t of ["get_account", "get_billing_summary", "open_account_portal", "logout_account"]) {
+    const r = await h.tools.dispatch(t, {});
+    assert.equal(r.ok, false, `${t} is not wired yet`);
+    assert.equal(r.error, "unsupported", `${t} returns honest tri-state 'unsupported', never a fake success`);
+    assert.match(String(r.result), /account/i, `${t} explains why`);
+  }
+  fs.rmSync(h.dir, { recursive: true, force: true });
+});
+
 test("layer1 trip: enters safe mode even when the surface budget is exhausted", async () => {
   const h = harness();
   // Exhaust enter_safe_mode's surface budget (5/300 s) with exits in between
@@ -243,8 +254,9 @@ test("MCP: tools/list advertises exactly the built tools, with the contract's de
   const res = await mcp.handle({ jsonrpc: "2.0", id: 2, method: "tools/list" });
   const tools = (res?.result as { tools: { name: string; description: string }[] }).tools;
   const names = tools.map((t) => t.name).sort();
-  assert.equal(names.length, 24, "all 24 control tools are built (apply_update INERT until keyed)");
+  assert.equal(names.length, 28, "all 28 control tools are built (24 + 4 account/billing, tri-state unsupported)");
   assert.ok(names.includes("apply_update") && names.includes("set_autonomy") && names.includes("get_health"));
+  assert.ok(names.includes("get_account") && names.includes("logout_account"), "account/billing knobs are served");
   const contract = loadContractTools();
   if (contract.size > 0) {
     const gh = tools.find((t) => t.name === "get_health");

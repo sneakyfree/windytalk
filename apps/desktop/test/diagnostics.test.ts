@@ -192,7 +192,9 @@ test("get_capabilities: tri-state; built=true, unbuilt=false, restart_engine deg
   assert.equal(caps.tools.set_volume, true);
   assert.equal(caps.tools.restart_engine, "degraded", "no child engine in the desktop client — deep reconnect");
   assert.equal(caps.tools.restart_app, true, "resurrection armed in this harness");
-  assert.equal(Object.keys(caps.tools).length, 24, "all 24 contract tools reported");
+  assert.equal(caps.tools.get_account, "unsupported", "account layer not wired — honest tri-state");
+  assert.equal(caps.tools.logout_account, "unsupported");
+  assert.equal(Object.keys(caps.tools).length, 28, "all 28 contract tools reported (24 + 4 account/billing)");
   cleanup(h);
 });
 

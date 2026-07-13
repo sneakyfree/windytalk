@@ -351,9 +351,38 @@
       "description": "Install a pending update — the ONE RCE-by-design tool. Guards (self_update, all NORMATIVE): signature-verified against the pinned key BEFORE staging (run_selftest is NOT the integrity gate); downgrade REFUSED (version must be > current — see self_update.anti_rollback); A/B staged with an OUT-OF-PROCESS rollback trigger that a hostile build cannot modify (self_update.out_of_process_rollback); rollback if the new build doesn't launch+heartbeat+bind+pass engine-reachability within 60 s (audio stages are NOT rollback triggers); disk precheck fails closed. Omitted version = 'latest' (channel-head). mode='updating' during staging; holds the recovery lock through the ~90 s window. In security.always_confirm_floor. Obeys response_ordering.",
       "inputSchema": { "type": "object", "properties": { "version": { "type": "string", "description": "from check_for_update, or 'latest' (default)" } }, "additionalProperties": false },
       "returns": { "type": "string", "$comment": "Human-readable outcome string (the `result` field of the {ok,result} envelope). Mutation/action knobs return a status message, not a structured object; failures surface as {ok:false,error} per the envelope." }
+    },
+    {
+      "name": "get_account",
+      "tier": "auto_allow",
+      "$comment_rev8": "rev.8 2026-07-13 (additive v1.1, ADR-060 §7 account/billing baseline — Talk lane handoff item 4). Talk's equivalents of Word's account/billing knobs. TRI-STATE: declared + discoverable + served, but forced-honest 'unsupported' until Talk's Windy-account layer (windy-connect pairing, ADR-058 D2; Eternitas wi_/EPT/wk_ chain) is wired — so a future agent finds the knob and gets a clear 'not wired' rather than 'unknown tool'. get_capabilities reports these 'unsupported'.",
+      "description": "Who is signed in to Windy Talk (the shared Windy account), the entitlement tier, and whether a Windy Fly agent is hatched. Read-only.",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "returns": { "type": "object", "properties": { "signed_in": { "type": "boolean" }, "tier": { "type": ["string", "null"], "$comment": "e.g. free / pro / eternitas" }, "windy_identity": { "type": ["string", "null"], "$comment": "wi_… — the shared Windy account id" }, "agent_name": { "type": ["string", "null"], "$comment": "the hatched Windy Fly agent's name, or null pre-hatch (the 'Windy Buddy' state)" } }, "required": ["signed_in"], "$comment": "Success shape once the account layer is wired; until then the tool returns ok:false error:'unsupported'." }
+    },
+    {
+      "name": "get_billing_summary",
+      "tier": "auto_allow",
+      "description": "The account's current plan / subscription status and usage this period. Read-only. (Windy Talk reads entitlement; the shared Windy account server is the billing origin — see open_account_portal to manage it.)",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "returns": { "type": "object", "properties": { "plan": { "type": ["string", "null"] }, "status": { "type": ["string", "null"], "$comment": "e.g. active / past_due / canceled / none" }, "usage": { "type": ["object", "null"], "$comment": "content-free counts/minutes this period" } }, "$comment": "Success shape once wired; until then ok:false error:'unsupported'." }
+    },
+    {
+      "name": "open_account_portal",
+      "tier": "ask_first",
+      "description": "Open the Windy account & billing management page in the browser (manage or cancel the subscription, view receipts). Opens a fixed, host-pinned Windy account URL — never an agent-supplied one.",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "returns": { "type": "string", "$comment": "Human-readable outcome string; failures surface as {ok:false,error} per the envelope." }
+    },
+    {
+      "name": "logout_account",
+      "tier": "ask_first",
+      "description": "Sign out of the Windy account on this device. Paid features stop until you sign back in; nothing is deleted and re-signing-in fully restores. Reversible, so ask_first (not floored).",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "returns": { "type": "string", "$comment": "Human-readable outcome string; failures surface as {ok:false,error} per the envelope." }
     }
   ],
-  "$tool_count_note": "24 tools: 8 diagnostics (get_health, get_status, get_config, get_logs, list_audio_devices, run_selftest, get_capabilities, check_for_update) + 9 recovery (reconnect, enter_safe_mode, exit_safe_mode, repair_resurrection, restart_engine, restart_app, clear_cache, reset_to_defaults, apply_update) + 7 config dials (set_audio_input, set_audio_output, set_volume, set_engine_url, set_brain, set_wake_mode, set_autonomy).",
+  "$tool_count_note": "28 tools (rev.8): 8 diagnostics (get_health, get_status, get_config, get_logs, list_audio_devices, run_selftest, get_capabilities, check_for_update) + 9 recovery (reconnect, enter_safe_mode, exit_safe_mode, repair_resurrection, restart_engine, restart_app, clear_cache, reset_to_defaults, apply_update) + 7 config dials (set_audio_input, set_audio_output, set_volume, set_engine_url, set_brain, set_wake_mode, set_autonomy) + 4 account/billing (get_account, get_billing_summary, open_account_portal, logout_account — ADR-060 §7 baseline, tri-state unsupported until the account layer is wired).",
 
   "telemetry": "Every mutating invocation that PASSES the gate and EXECUTES emits a content-free control.action event {tool, ok, error?, mode} per telemetry.v1 / ADR-058 D10 (adopted from design Open decision 3). Gate rejections (denied / rate_limited / already_recovering — no mutation happened) do NOT emit, so the self-heal-rate metric's denominator is 'actions taken', not 'actions attempted'. Content-free: no arg values, no transcripts.",
 

@@ -30,6 +30,9 @@ export const EXEMPT_READS = new Set([
   "list_audio_devices",
   "get_capabilities",
   "check_for_update",
+  // account/billing reads (rev.8) — pure reads, lock-exempt like the others.
+  "get_account",
+  "get_billing_summary",
 ]);
 
 /** set_* config dials: no lock taken, but blocked while a recovery is in flight. */
