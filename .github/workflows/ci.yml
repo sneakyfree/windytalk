@@ -24,7 +24,7 @@ jobs:
         # websockets + pytest-asyncio ARE needed (server tests import them).
         run: pip install ruff pytest pytest-asyncio jsonschema numpy websockets
       - name: Lint (ruff — all python modules)
-        run: ruff check engine brains agents hands auth telemetry wakeword gauntlet tests
+        run: ruff check engine server brains agents hands auth telemetry wakeword gauntlet tests
       - name: Unit tests (pytest)
         run: python -m pytest tests/ -q
 
