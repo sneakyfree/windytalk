@@ -1,0 +1,124 @@
+{
+  "$comment": "engine.mcp.v1 — the ENGINE BOX's own self-heal control surface (ADR-060 §7 baseline; Talk lane handoff item 1). SEPARATE from control.mcp.v1 (the desktop app's health) and hands.mcp.v1 (drives OTHER apps): this is the health of the voice-engine box (the 5090 running engine/server.py — STT + TTS + brain-stem). Before this, a wedged engine box could only be FALLEN AWAY FROM (control.mcp.v1 set_engine_url) — never HEALED. Now an agent can diagnose it and restart the worker remotely. Two-layer / doctor-not-in-patient per docs/CONTROL_SURFACE_DESIGN: the surface is hosted by a SUPERVISOR process (server/supervise.py) that owns the engine WORKER as a subprocess, so restart_engine works even when the worker is hung — the doctor is not in the patient. Bilingual (MCP + native HTTP /tools /invoke /mcp) per ADR-060 §3.2, same security wall (per-install token + loopback bind + Origin/Host reject). Change control: additive -> v1.1 via PR; breaking -> v2 + tell Grant.",
+  "$comment_class": "FLAG for the doctrine lane: class is 'cloud' (the engine box is a server/service, not a user desktop), but the security wall is desktop-style (per-install token + loopback bind) because the surface binds loopback ON the box and is reached over SSH tunnel / the server/ relay — NOT the ADR-060 §3.3 cloud EPT+CONFIRM_FLOW. Flagged to Grant: ratify loopback-token for an on-box server surface, or require EPT.",
+  "contract": "engine.mcp.v1",
+  "doctrine": "ADR-060 v1.0",
+  "product": "windytalk-engine",
+  "class": "cloud",
+  "mcp_protocol": "2025-06-18",
+  "security": {
+    "$comment": "Per-install bearer token (constant-time compare), loopback-only bind on the engine box, reject any request carrying an Origin header, no CORS. Remote reach is via SSH tunnel or the server/ relay (entitlement-gated) — never a public bind. Same proven wall as hands/surface.py + control.mcp.v1.",
+    "port": 8783,
+    "token": {
+      "storage": "~/.windytalk/engine-control-token (0600)",
+      "header": "X-Windytalk-Engine-Token",
+      "env_override": "WINDYTALK_ENGINE_CONTROL_TOKEN"
+    }
+  },
+  "tiers": {
+    "$comment": "Enforced at the surface (server/supervise.py), not the caller. auto_allow: execute immediately. ask_first: per-invocation confirmation. always_confirm: per-invocation confirmation, no session upgrade. A denial returns ok:false error:'denied' — never silence.",
+    "values": ["auto_allow", "ask_first", "always_confirm"]
+  },
+  "platform_note": "Tools that this v1 does not yet implement return ok:false error:'unsupported' with an honest reason (tri-state per ADR-060) — the tool never disappears from the list, so a future agent finds it and gets 'not wired, here's why' rather than 'unknown tool'. get_capabilities reports each tool true / false / 'unsupported'.",
+  "tools": [
+    {
+      "name": "get_health",
+      "tier": "auto_allow",
+      "description": "The FIRST tool when the voice engine seems down. One call → is the engine box healthy: worker process alive, providers (STT/TTS) warm, GPU present, websocket serving, and not crash-looping.",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "returns": { "type": "object", "properties": { "healthy": { "type": "boolean", "$comment": "worker_alive && providers_warm && serving && !crash_loop" }, "worker_alive": { "type": "boolean" }, "providers_warm": { "type": "boolean" }, "gpu": { "type": ["boolean", "null"], "$comment": "GPU present/visible; null if undetermined" }, "serving": { "type": "boolean", "$comment": "websocket accepting sessions" }, "active_sessions": { "type": "integer" }, "mode": { "type": "string", "enum": ["normal", "safe", "restarting", "down"] } }, "required": ["healthy", "worker_alive", "mode"] }
+    },
+    {
+      "name": "get_status",
+      "tier": "auto_allow",
+      "description": "Current engine runtime state: serving/warming/restarting/down, active session count, and uptime.",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "returns": { "type": "object", "properties": { "state": { "type": "string", "enum": ["serving", "warming", "restarting", "down"] }, "active_sessions": { "type": "integer" }, "uptime_s": { "type": ["number", "null"] } }, "required": ["state"] }
+    },
+    {
+      "name": "get_config",
+      "tier": "auto_allow",
+      "description": "The engine's effective configuration: selected STT / TTS / brain providers, compute device, and bind port. Secrets redacted.",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "returns": { "type": "object", "properties": { "stt": { "type": ["string", "null"] }, "tts": { "type": ["string", "null"] }, "brain": { "type": ["string", "null"] }, "device": { "type": ["string", "null"] }, "port": { "type": ["integer", "null"] } } }
+    },
+    {
+      "name": "get_logs",
+      "tier": "auto_allow",
+      "description": "Recent engine-box logs, scrubbed of secrets and user content. For diagnosing a wedge or crash-loop.",
+      "inputSchema": { "type": "object", "properties": { "lines": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "how many trailing lines (default 100)" } }, "additionalProperties": false },
+      "returns": { "type": "string", "$comment": "the scrubbed log tail" }
+    },
+    {
+      "name": "run_selftest",
+      "tier": "auto_allow",
+      "description": "Actively exercise the engine's core path on the box (engine/pipeline.py): synthesize a phrase → transcribe it → confirm round-trip, with per-stage pass/fail + timings. Proof the STT and TTS providers actually work here, not just that the process is up.",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "returns": { "type": "object", "properties": { "ok": { "type": "boolean" }, "stages": { "type": "array", "items": { "type": "object", "properties": { "stage": { "type": "string" }, "pass": { "type": "boolean" }, "detail": { "type": "string" }, "ms": { "type": "number" } } } } }, "required": ["ok"] }
+    },
+    {
+      "name": "get_capabilities",
+      "tier": "auto_allow",
+      "description": "Which engine control tools actually work on this box right now — tri-state true / false / 'unsupported' per tool (ADR-060). Honest about what this v1 surface can and can't heal.",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "returns": { "type": "object", "properties": { "tools": { "type": "object", "additionalProperties": { "type": ["boolean", "string"] } } }, "required": ["tools"] }
+    },
+    {
+      "name": "reconnect",
+      "tier": "auto_allow",
+      "description": "Re-warm the engine's providers and re-establish the upstream brain (Mind) connection WITHOUT restarting the worker process — the lightest heal. Blocks up to ~15 s.",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "returns": { "type": "string", "$comment": "human-readable outcome; failures surface as ok:false error." }
+    },
+    {
+      "name": "restart_engine",
+      "tier": "ask_first",
+      "description": "THE core heal: the supervisor restarts the engine WORKER process. Works even when the worker is hung (the supervisor owns it — doctor-not-in-patient), so this recovers a wedged engine that reconnect can't. Active voice sessions drop and reconnect. Response is sent BEFORE the restart executes (response-ordering).",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "returns": { "type": "string", "$comment": "e.g. 'restarting the engine worker'; failures surface as ok:false error." }
+    },
+    {
+      "name": "enter_safe_mode",
+      "tier": "auto_allow",
+      "description": "Drop the engine to its most reliable minimal provider set (smallest STT, CPU device, default TTS) to keep SOME service when the full stack is failing. Persisted so a crash-loop restarts into safe mode.",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "returns": { "type": "string", "$comment": "Declared; tri-state 'unsupported' in v1 until the minimal-provider path is wired." }
+    },
+    {
+      "name": "exit_safe_mode",
+      "tier": "ask_first",
+      "description": "Leave safe mode and restore the full provider set.",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "returns": { "type": "string", "$comment": "Declared; tri-state 'unsupported' in v1 (pairs with enter_safe_mode)." }
+    },
+    {
+      "name": "set_engine_config",
+      "tier": "ask_first",
+      "description": "Change the engine's providers/device (e.g. switch STT model, move to CPU) via a validated config, applied on the next worker restart. The engine's typed settings catalog.",
+      "inputSchema": { "type": "object", "properties": { "stt": { "type": "string" }, "tts": { "type": "string" }, "brain": { "type": "string" }, "device": { "type": "string", "enum": ["cuda", "cpu"] } }, "additionalProperties": false },
+      "returns": { "type": "string", "$comment": "Declared; tri-state 'unsupported' in v1 until the persisted engine-config store + undo lands." }
+    },
+    {
+      "name": "check_for_update",
+      "tier": "auto_allow",
+      "description": "Is a newer engine-box deployment available to install? A read-only check that reports the current and latest engine versions.",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "returns": { "type": "object", "properties": { "update_available": { "type": "boolean" }, "current": { "type": ["string", "null"] } }, "$comment": "Declared; tri-state 'unsupported' in v1 (no engine update pipeline yet)." }
+    },
+    {
+      "name": "apply_update",
+      "tier": "always_confirm",
+      "description": "Deploy a pending engine update and restart the worker. Attested + rollback when wired.",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "returns": { "type": "string", "$comment": "Declared; tri-state 'unsupported' in v1 (the engine self-update pipeline is a follow-up)." }
+    },
+    {
+      "name": "reset_to_defaults",
+      "tier": "always_confirm",
+      "description": "Reset the engine to its default provider set and restart the worker. The big red button for a mis-configured engine box.",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "returns": { "type": "string", "$comment": "e.g. 'reset to defaults; restarting the worker'." }
+    }
+  ],
+  "$tool_count_note": "14 tools: 6 diagnostics (get_health, get_status, get_config, get_logs, run_selftest, get_capabilities) + 8 recovery/config (reconnect, restart_engine, enter_safe_mode, exit_safe_mode, set_engine_config, check_for_update, apply_update, reset_to_defaults). v1 implements the diagnostics + reconnect + restart_engine + reset_to_defaults LIVE; enter/exit_safe_mode, set_engine_config, check_for_update, apply_update are declared but tri-state 'unsupported' until wired."
+}

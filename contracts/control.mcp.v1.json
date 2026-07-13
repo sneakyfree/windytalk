@@ -1,6 +1,10 @@
 {
   "$comment": "control.mcp.v1 — FROZEN 2026-07-11 (rev.6), after FIVE adversarial verify rounds (each = a builder-lens + a security/promise-lens reviewer). Findings per round: 16, 9, 2, 1, 1 — a clean convergence. Round 5's two reviewers INDEPENDENTLY converged on a single finding (the tier-2 SIGKILL needed the same pid-identity verify rev.5 gave the takeover kill — pinned in resurrection.heartbeat.staleness_tiers.identity_aware) and both explicitly recommended freezing rev.6 after that determinate pin without a sixth full round; every other rev.5 mechanism survived direct attack in both round-5 reviews. Frozen accordingly. Frozen != infallible: additive -> v1.1 via PR; breaking -> v2 + tell Grant (contracts/README.md). The SELF-HEAL surface: the knobs an agent may touch to keep Windy Talk running so a non-technical user ('grandma') is never stranded. Formalizes the 'knobs' half of ADR-058 D4 under D5 trust tiers. SEPARATE from hands.mcp.v1 (drives OTHER apps) — this is Windy Talk's OWN health. Hosted by the supervisor (Electron main), not the voice engine: the doctor is not in the patient; the supervisor is kept alive by an OS resurrection service. Change control: additive -> v1.1 via PR; breaking -> v2 + tell Grant (contracts/README.md).",
+  "$comment_rev7": "rev.7 2026-07-13 (additive v1.1, ADR-060 doctrine-compliance ramp — Talk lane handoff TALK-LANE-2026-07-13): added the required doctrine/product/class headers and per-tool 'returns' schemas so the Loom conformance driver can assert result shapes. No tool semantics changed — purely additive metadata (change control satisfied: additive -> minor rev in place).",
   "contract": "control.mcp.v1",
+  "doctrine": "ADR-060 v1.0",
+  "product": "windytalk",
+  "class": "desktop",
   "mcp_protocol": "2025-06-18",
   "$mcp_protocol_note": "Served over BOTH JSON-RPC MCP and plain local HTTP (GET /tools, POST /invoke), same dual transport as hands.mcp.v1. MCP compliance is NORMATIVE and goes beyond hands' handler: the server MUST answer `initialize` (echoing protocolVersion '2025-06-18') and `notifications/initialized`; structured diagnostic results are serialized as canonical JSON in the text content AND as `structuredContent`. NOTE for the builder: hands/surface.py handle_mcp is the starting point but (a) implements no initialize lifecycle and (b) renders results via Python str() which is NOT valid JSON (single quotes) — both must be fixed here; the str() issue is also a latent bug in hands worth flagging to Grant.",
 
@@ -239,101 +243,146 @@
       "name": "reconnect",
       "tier": "auto_allow",
       "description": "Re-dial the connection to the voice engine (same session). No data/settings lost. The #1 fix for 'it stopped responding'. Blocks up to 10 s; ok:true result:'reconnected' only on an established session, else ok:false error:'timeout'. Governed by recovery_coordinator (lock + debounce + rate-limit); Layer 1's own retry is exempt and unbounded so a real outage is never permanently abandoned.",
-      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "returns": { "type": "string", "$comment": "Human-readable outcome string (the `result` field of the {ok,result} envelope). Mutation/action knobs return a status message, not a structured object; failures surface as {ok:false,error} per the envelope." }
     },
     {
       "name": "enter_safe_mode",
       "tier": "auto_allow",
       "description": "Drop to the minimal reliable overlay (push-to-talk, hands off, default brain/devices) over untouched config; persisted so a crash-loop relaunches into safe mode, not the loop. Safe-direction (auto_allow) but rate-limited (repeated calls are a feature-DoS). May PREEMPT the recovery lock — it's the escape hatch for a stuck state.",
-      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "returns": { "type": "string", "$comment": "Human-readable outcome string (the `result` field of the {ok,result} envelope). Mutation/action knobs return a status message, not a structured object; failures surface as {ok:false,error} per the envelope." }
     },
     {
       "name": "exit_safe_mode",
       "tier": "ask_first",
       "description": "Leave safe mode: DROP the safe-mode overlay so the persisted config — INCLUDING any set_* saves made during safe mode — becomes active (re-enables hands/wake/brain/devices as a unit). Does NOT restore a frozen entry-time snapshot (that would discard those saves — see safe_mode.exit). In security.always_confirm_floor: it moves AWAY from the reliable floor, so it ALWAYS confirms (never dissolved by autonomy or a session grant). Recovery-lock holder; rate-limited (symmetric with enter_safe_mode).",
-      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "returns": { "type": "string", "$comment": "Human-readable outcome string (the `result` field of the {ok,result} envelope). Mutation/action knobs return a status message, not a structured object; failures surface as {ok:false,error} per the envelope." }
     },
     {
       "name": "repair_resurrection",
       "tier": "ask_first",
       "description": "Re-install and re-arm the OS resurrection service (the 'true floor') when get_health.resurrection_armed is false. It and the launch-time auto-repair (resurrection.self_check) invoke the SAME single, serialized, idempotent repair routine (so they can't race even if repair_resurrection is called while self_check is mid-repair — both converge). On a machine where privilege blocks it, returns ok:false error:'unsupported' with the manual step in `result`. Not a lock holder (it doesn't touch the engine/session).",
-      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "returns": { "type": "string", "$comment": "Human-readable outcome string (the `result` field of the {ok,result} envelope). Mutation/action knobs return a status message, not a structured object; failures surface as {ok:false,error} per the envelope." }
     },
     {
       "name": "restart_engine",
       "tier": "ask_first",
       "description": "Restart the voice session. On a LOCAL child engine: restart the process (obeys response_ordering). On a REMOTE engine: DEGRADED (normative) — performs a deep reconnect (drop session state, close socket, re-authenticate, new voice-session — distinct from reconnect which re-dials the SAME session) and returns ok:true result:'engine is remote — performed deep reconnect'. get_capabilities reports restart_engine 'degraded' on remote-engine boxes.",
-      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "returns": { "type": "string", "$comment": "Human-readable outcome string (the `result` field of the {ok,result} envelope). Mutation/action knobs return a status message, not a structured object; failures surface as {ok:false,error} per the envelope." }
     },
     {
       "name": "restart_app",
       "tier": "ask_first",
       "description": "Relaunch the whole desktop client via the single resurrection path (exit with the distinguished code + remove the heartbeat; the OS service relaunches). Obeys response_ordering. Heaviest reversible recovery.",
-      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "returns": { "type": "string", "$comment": "Human-readable outcome string (the `result` field of the {ok,result} envelope). Mutation/action knobs return a status message, not a structured object; failures surface as {ok:false,error} per the envelope." }
     },
     {
       "name": "clear_cache",
       "tier": "ask_first",
       "description": "Clear transient caches (asset cache, tmp, stale session state) and reconnect. Settings + history kept. On-device MODELS (wake-word / ASR) are EXPLICITLY EXCLUDED in v1 — never triggers a multi-GB re-download on a normie's machine. Capability-gated (paths differ per OS).",
-      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "returns": { "type": "string", "$comment": "Human-readable outcome string (the `result` field of the {ok,result} envelope). Mutation/action knobs return a status message, not a structured object; failures surface as {ok:false,error} per the envelope." }
     },
     {
       "name": "set_audio_input",
       "tier": "ask_first",
       "description": "Select the microphone by id (from list_audio_devices). The common fix for 'it can't hear me'. Not a recovery-lock holder; blocked with already_recovering only if a recovery is in flight.",
-      "inputSchema": { "type": "object", "properties": { "device_id": { "type": "string" } }, "required": ["device_id"], "additionalProperties": false }
+      "inputSchema": { "type": "object", "properties": { "device_id": { "type": "string" } }, "required": ["device_id"], "additionalProperties": false },
+      "returns": { "type": "string", "$comment": "Human-readable outcome string (the `result` field of the {ok,result} envelope). Mutation/action knobs return a status message, not a structured object; failures surface as {ok:false,error} per the envelope." }
     },
     {
       "name": "set_audio_output",
       "tier": "ask_first",
       "description": "Select the speaker/output by id (from list_audio_devices). The common fix for 'I can't hear it'.",
-      "inputSchema": { "type": "object", "properties": { "device_id": { "type": "string" } }, "required": ["device_id"], "additionalProperties": false }
+      "inputSchema": { "type": "object", "properties": { "device_id": { "type": "string" } }, "required": ["device_id"], "additionalProperties": false },
+      "returns": { "type": "string", "$comment": "Human-readable outcome string (the `result` field of the {ok,result} envelope). Mutation/action knobs return a status message, not a structured object; failures surface as {ok:false,error} per the envelope." }
     },
     {
       "name": "set_volume",
       "tier": "ask_first",
       "description": "Set the assistant's OWN output gain, 0-100 (never the OS mixer). Value-conditional tier (see tier_resolution.step1): level>0 -> auto_allow; level==0 -> always_confirm (muting is a stranding vector, and level==0 is in security.always_confirm_floor, so it confirms every time even at high autonomy).",
-      "inputSchema": { "type": "object", "properties": { "level": { "type": "integer", "minimum": 0, "maximum": 100 } }, "required": ["level"], "additionalProperties": false }
+      "inputSchema": { "type": "object", "properties": { "level": { "type": "integer", "minimum": 0, "maximum": 100 } }, "required": ["level"], "additionalProperties": false },
+      "returns": { "type": "string", "$comment": "Human-readable outcome string (the `result` field of the {ok,result} envelope). Mutation/action knobs return a status message, not a structured object; failures surface as {ok:false,error} per the envelope." }
     },
     {
       "name": "set_engine_url",
       "tier": "ask_first",
       "description": "Point at a different voice engine (cloud fallback or back to local). Host-pinned to security.engine_allow_list (loopback ws://, or allow-listed wss:// hosts, matched on urlparse().hostname); a rejected host returns error:'untrusted host: <host>' (never 'denied'). In security.always_confirm_floor (redirects data flow — always confirms).",
-      "inputSchema": { "type": "object", "properties": { "url": { "type": "string" } }, "required": ["url"], "additionalProperties": false }
+      "inputSchema": { "type": "object", "properties": { "url": { "type": "string" } }, "required": ["url"], "additionalProperties": false },
+      "returns": { "type": "string", "$comment": "Human-readable outcome string (the `result` field of the {ok,result} envelope). Mutation/action knobs return a status message, not a structured object; failures surface as {ok:false,error} per the envelope." }
     },
     {
       "name": "set_brain",
       "tier": "ask_first",
       "description": "Switch which model/brain answers (via Windy Mind). Validated against the last-synced entitlement CACHE (works offline, when it's most needed); 'default' always accepted; unentitled => error:'not entitled to brain: <id>'. In security.always_confirm_floor.",
-      "inputSchema": { "type": "object", "properties": { "brain": { "type": "string" } }, "required": ["brain"], "additionalProperties": false }
+      "inputSchema": { "type": "object", "properties": { "brain": { "type": "string" } }, "required": ["brain"], "additionalProperties": false },
+      "returns": { "type": "string", "$comment": "Human-readable outcome string (the `result` field of the {ok,result} envelope). Mutation/action knobs return a status message, not a structured object; failures surface as {ok:false,error} per the envelope." }
     },
     {
       "name": "set_wake_mode",
       "tier": "ask_first",
       "description": "Turn hands-free 'Hey Windy' on or off (off = push-to-talk). ask_first; and when hands_free==true it is in security.always_confirm_floor (enabling always-listen is a privacy escalation, so it confirms every time even at high autonomy). Turning it OFF is the safe direction and follows the normal ask_first path.",
-      "inputSchema": { "type": "object", "properties": { "hands_free": { "type": "boolean" } }, "required": ["hands_free"], "additionalProperties": false }
+      "inputSchema": { "type": "object", "properties": { "hands_free": { "type": "boolean" } }, "required": ["hands_free"], "additionalProperties": false },
+      "returns": { "type": "string", "$comment": "Human-readable outcome string (the `result` field of the {ok,result} envelope). Mutation/action knobs return a status message, not a structured object; failures surface as {ok:false,error} per the envelope." }
     },
     {
       "name": "set_autonomy",
       "tier": "ask_first",
       "description": "How much the agent may do without asking (drives tiers.autonomy_mapping). DIRECTION-AWARE via tier_override (the ONLY tool with one; tier_override fully REPLACES the static ask_first tier — see tier_resolution.step1). In security.always_confirm_floor when raising. 0 = ask about everything, 10 = maximum hands-free (never touches always_confirm tools or the floor). Fresh-install cap = 3.",
       "tier_override": { "$comment": "Resolved by the SURFACE (not TierPolicy as-is — a documented extension of the hands pattern), reading current autonomy from the coordinator's config snapshot at gate time.", "param": "level", "compare_to": "current_autonomy", "lower_or_equal": "auto_allow", "higher": "always_confirm" },
-      "inputSchema": { "type": "object", "properties": { "level": { "type": "integer", "minimum": 0, "maximum": 10 } }, "required": ["level"], "additionalProperties": false }
+      "inputSchema": { "type": "object", "properties": { "level": { "type": "integer", "minimum": 0, "maximum": 10 } }, "required": ["level"], "additionalProperties": false },
+      "returns": { "type": "string", "$comment": "Human-readable outcome string (the `result` field of the {ok,result} envelope). Mutation/action knobs return a status message, not a structured object; failures surface as {ok:false,error} per the envelope." }
     },
     {
       "name": "reset_to_defaults",
       "tier": "always_confirm",
       "description": "The big red button. Restore FACTORY defaults (the immutable baked-in constant — NOT the persisted last-known-good, which Layer 1's automatic recovery uses) and restart clean. SETTINGS-ONLY (conversation history preserved; a separate explicit tool would wipe history). SURVIVES (deliberately, so a mid-rescue agent isn't disconnected and the floor stays armed): the per-install token, the engine allow-list, and the resurrection registration. NOTE: because the allow-list and token survive, a maliciously-paired engine host or a leaked token is NOT undone by reset — that remediation is a separate explicit UI action (re-pair / rotate token), offered from the reset flow. Autonomy resets to the fresh-install cap (3). Obeys response_ordering. In security.always_confirm_floor. Also the action behind the physical Reset button.",
-      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "returns": { "type": "string", "$comment": "Human-readable outcome string (the `result` field of the {ok,result} envelope). Mutation/action knobs return a status message, not a structured object; failures surface as {ok:false,error} per the envelope." }
     },
     {
       "name": "apply_update",
       "tier": "always_confirm",
       "description": "Install a pending update — the ONE RCE-by-design tool. Guards (self_update, all NORMATIVE): signature-verified against the pinned key BEFORE staging (run_selftest is NOT the integrity gate); downgrade REFUSED (version must be > current — see self_update.anti_rollback); A/B staged with an OUT-OF-PROCESS rollback trigger that a hostile build cannot modify (self_update.out_of_process_rollback); rollback if the new build doesn't launch+heartbeat+bind+pass engine-reachability within 60 s (audio stages are NOT rollback triggers); disk precheck fails closed. Omitted version = 'latest' (channel-head). mode='updating' during staging; holds the recovery lock through the ~90 s window. In security.always_confirm_floor. Obeys response_ordering.",
-      "inputSchema": { "type": "object", "properties": { "version": { "type": "string", "description": "from check_for_update, or 'latest' (default)" } }, "additionalProperties": false }
+      "inputSchema": { "type": "object", "properties": { "version": { "type": "string", "description": "from check_for_update, or 'latest' (default)" } }, "additionalProperties": false },
+      "returns": { "type": "string", "$comment": "Human-readable outcome string (the `result` field of the {ok,result} envelope). Mutation/action knobs return a status message, not a structured object; failures surface as {ok:false,error} per the envelope." }
+    },
+    {
+      "name": "get_account",
+      "tier": "auto_allow",
+      "$comment_rev8": "rev.8 2026-07-13 (additive v1.1, ADR-060 §7 account/billing baseline — Talk lane handoff item 4). Talk's equivalents of Word's account/billing knobs. TRI-STATE: declared + discoverable + served, but forced-honest 'unsupported' until Talk's Windy-account layer (windy-connect pairing, ADR-058 D2; Eternitas wi_/EPT/wk_ chain) is wired — so a future agent finds the knob and gets a clear 'not wired' rather than 'unknown tool'. get_capabilities reports these 'unsupported'.",
+      "description": "Who is signed in to Windy Talk (the shared Windy account), the entitlement tier, and whether a Windy Fly agent is hatched. Read-only.",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "returns": { "type": "object", "properties": { "signed_in": { "type": "boolean" }, "tier": { "type": ["string", "null"], "$comment": "e.g. free / pro / eternitas" }, "windy_identity": { "type": ["string", "null"], "$comment": "wi_… — the shared Windy account id" }, "agent_name": { "type": ["string", "null"], "$comment": "the hatched Windy Fly agent's name, or null pre-hatch (the 'Windy Buddy' state)" } }, "required": ["signed_in"], "$comment": "Success shape once the account layer is wired; until then the tool returns ok:false error:'unsupported'." }
+    },
+    {
+      "name": "get_billing_summary",
+      "tier": "auto_allow",
+      "description": "The account's current plan / subscription status and usage this period. Read-only. (Windy Talk reads entitlement; the shared Windy account server is the billing origin — see open_account_portal to manage it.)",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "returns": { "type": "object", "properties": { "plan": { "type": ["string", "null"] }, "status": { "type": ["string", "null"], "$comment": "e.g. active / past_due / canceled / none" }, "usage": { "type": ["object", "null"], "$comment": "content-free counts/minutes this period" } }, "$comment": "Success shape once wired; until then ok:false error:'unsupported'." }
+    },
+    {
+      "name": "open_account_portal",
+      "tier": "ask_first",
+      "description": "Open the Windy account & billing management page in the browser (manage or cancel the subscription, view receipts). Opens a fixed, host-pinned Windy account URL — never an agent-supplied one.",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "returns": { "type": "string", "$comment": "Human-readable outcome string; failures surface as {ok:false,error} per the envelope." }
+    },
+    {
+      "name": "logout_account",
+      "tier": "ask_first",
+      "description": "Sign out of the Windy account on this device. Paid features stop until you sign back in; nothing is deleted and re-signing-in fully restores. Reversible, so ask_first (not floored).",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "returns": { "type": "string", "$comment": "Human-readable outcome string; failures surface as {ok:false,error} per the envelope." }
     }
   ],
-  "$tool_count_note": "24 tools: 8 diagnostics (get_health, get_status, get_config, get_logs, list_audio_devices, run_selftest, get_capabilities, check_for_update) + 9 recovery (reconnect, enter_safe_mode, exit_safe_mode, repair_resurrection, restart_engine, restart_app, clear_cache, reset_to_defaults, apply_update) + 7 config dials (set_audio_input, set_audio_output, set_volume, set_engine_url, set_brain, set_wake_mode, set_autonomy).",
+  "$tool_count_note": "28 tools (rev.8): 8 diagnostics (get_health, get_status, get_config, get_logs, list_audio_devices, run_selftest, get_capabilities, check_for_update) + 9 recovery (reconnect, enter_safe_mode, exit_safe_mode, repair_resurrection, restart_engine, restart_app, clear_cache, reset_to_defaults, apply_update) + 7 config dials (set_audio_input, set_audio_output, set_volume, set_engine_url, set_brain, set_wake_mode, set_autonomy) + 4 account/billing (get_account, get_billing_summary, open_account_portal, logout_account — ADR-060 §7 baseline, tri-state unsupported until the account layer is wired).",
 
   "telemetry": "Every mutating invocation that PASSES the gate and EXECUTES emits a content-free control.action event {tool, ok, error?, mode} per telemetry.v1 / ADR-058 D10 (adopted from design Open decision 3). Gate rejections (denied / rate_limited / already_recovering — no mutation happened) do NOT emit, so the self-heal-rate metric's denominator is 'actions taken', not 'actions attempted'. Content-free: no arg values, no transcripts.",
 

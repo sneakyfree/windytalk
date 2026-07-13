@@ -1,0 +1,19 @@
+{
+  "product": "windytalk",
+  "class": "desktop",
+  "http": {
+    "base_default": "http://127.0.0.1:8782",
+    "base_env": "WINDY_TALK_CONTROL_URL"
+  },
+  "auth": {
+    "kind": "install_token",
+    "token_path_default": "~/.windytalk/control-token",
+    "token_env": "WINDYTALK_CONTROL_TOKEN"
+  },
+  "package": {
+    "name": "windy-talk-mcp",
+    "version": "0.1.0",
+    "description": "MCP server for Windy Talk's self-heal control surface — proxies the local control API on 127.0.0.1:8782 (ADR-060 §3.2 native transport). Grandma's agent uses these knobs to keep Windy Talk running."
+  },
+  "python_module": "windytalk_control"
+}

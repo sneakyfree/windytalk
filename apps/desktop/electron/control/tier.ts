@@ -34,6 +34,11 @@ export const STATIC_TIER: Record<string, Tier> = {
   set_autonomy: "ask_first",
   reset_to_defaults: "always_confirm",
   apply_update: "always_confirm",
+  // account/billing (rev.8, ADR-060 §7) — tri-state unsupported until wired.
+  get_account: "auto_allow",
+  get_billing_summary: "auto_allow",
+  open_account_portal: "ask_first",
+  logout_account: "ask_first",
 };
 
 /** security.always_confirm_floor.always — unconditional members. */

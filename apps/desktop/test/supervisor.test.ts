@@ -131,14 +131,22 @@ test("HTTP routes: /tools, /invoke, /mcp all behind the wall; MCP notification -
   const names = (JSON.parse(list.body).tools as { name: string }[]).map((t) => t.name);
   assert.ok(names.includes("get_health") && names.includes("reconnect") && names.includes("get_logs"));
 
+  // ADR-060 §3.2 canonical native shape: {name, arguments} -> {ok, result}.
   const invoke = await call(
     { path: "/invoke", method: "POST", headers: auth },
-    JSON.stringify({ tool: "get_health", args: {} }),
+    JSON.stringify({ name: "get_health", arguments: {} }),
   );
   assert.equal(invoke.status, 200);
   const health = JSON.parse(invoke.body);
   assert.equal(health.ok, true);
   assert.equal(typeof health.result.healthy, "boolean");
+
+  // Legacy {tool, args} shape still accepted (back-compat, non-breaking).
+  const legacy = await call(
+    { path: "/invoke", method: "POST", headers: auth },
+    JSON.stringify({ tool: "get_health", args: {} }),
+  );
+  assert.equal(JSON.parse(legacy.body).ok, true);
 
   const mcpInit = await call(
     { path: "/mcp", method: "POST", headers: auth },

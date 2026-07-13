@@ -128,6 +128,7 @@ const MUTATING = new Set([
   "restart_engine", "restart_app", "clear_cache", "reset_to_defaults",
   "set_audio_input", "set_audio_output", "set_volume", "set_engine_url",
   "set_brain", "set_wake_mode", "set_autonomy", "apply_update",
+  "logout_account",
 ]);
 
 const SET_TOOLS = new Set([
@@ -151,6 +152,8 @@ const CONFIRM_MESSAGES: Record<string, string> = {
   set_wake_mode: "Let Windy Talk listen for 'Hey Windy' all the time?",
   set_autonomy: "Let the assistant do more without asking first?",
   apply_update: "Install the latest Windy Talk update and restart?",
+  open_account_portal: "Open your Windy account & billing page in the browser?",
+  logout_account: "Sign out of your Windy account on this device? You can sign back in anytime.",
 };
 
 export class ControlTools {
@@ -173,6 +176,7 @@ export class ControlTools {
       "restart_engine", "restart_app", "clear_cache", "reset_to_defaults",
       "set_audio_input", "set_audio_output", "set_volume", "set_engine_url",
       "set_brain", "set_wake_mode", "set_autonomy", "apply_update",
+      "get_account", "get_billing_summary", "open_account_portal", "logout_account",
     ];
   }
 
@@ -442,6 +446,22 @@ export class ControlTools {
       }
       case "apply_update":
         return this.applyUpdateTool(args);
+      // account/billing (rev.8, ADR-060 §7): declared + served so a future
+      // agent DISCOVERS them, but forced-honest 'unsupported' until Talk's
+      // Windy-account layer (windy-connect pairing / Eternitas wi_-EPT-wk_
+      // chain) is wired. get_capabilities reports these 'unsupported' too.
+      case "get_account":
+      case "get_billing_summary":
+      case "open_account_portal":
+      case "logout_account":
+        return {
+          ok: false,
+          error: "unsupported",
+          result:
+            "account/billing isn't wired into Windy Talk yet — sign-in and " +
+            "entitlement run through the shared Windy account (windy-connect " +
+            "pairing). This knob is declared so it can be driven once that lands.",
+        };
       default:
         return { ok: false, error: "unsupported" };
     }
@@ -616,11 +636,21 @@ export class ControlTools {
       "restart_engine", "restart_app", "clear_cache", "reset_to_defaults", "apply_update",
       "set_audio_input", "set_audio_output", "set_volume", "set_engine_url",
       "set_brain", "set_wake_mode", "set_autonomy",
+      "get_account", "get_billing_summary", "open_account_portal", "logout_account",
     ];
+    const ACCOUNT_UNWIRED = new Set([
+      "get_account", "get_billing_summary", "open_account_portal", "logout_account",
+    ]);
     const tools: Record<string, boolean | string> = {};
     for (const t of all) {
       if (!built.has(t)) {
         tools[t] = false;
+        continue;
+      }
+      if (ACCOUNT_UNWIRED.has(t)) {
+        // Declared + served, but the Windy-account layer isn't wired yet:
+        // honest tri-state 'unsupported' (ADR-060 §7), not a false 'true'.
+        tools[t] = "unsupported";
         continue;
       }
       if (t === "restart_engine") {
@@ -708,6 +738,9 @@ export class ControlTools {
         "set_autonomy",
         "reset_to_defaults",
         "apply_update",
+        // account/billing actions (rev.8); the two reads are in EXEMPT_READS.
+        "open_account_portal",
+        "logout_account",
       ].includes(tool)
     );
   }
