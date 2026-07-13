@@ -253,8 +253,21 @@ def _selftest() -> tuple[bool, str]:
         msg = b.screenshot("windytalk-wizard-selftest.png")
         path = msg.rsplit("Saved screenshot to ", 1)[-1].strip()
         size = Path(path).stat().st_size
-        lines.append(f"PASS  screenshot file ({size:,} bytes)")
         shot_ok = size > 0
+        # macOS honesty: screencapture ALWAYS writes a non-empty file, but
+        # WITHOUT the Screen Recording grant it silently redacts every other
+        # app's window (live-verified on OC5: a running Calculator's window was
+        # absent — only the wallpaper). A non-empty file is NOT proof the vision
+        # spine can see app windows, so say so when the grant is missing.
+        redacted = (sys.platform == "darwin"
+                    and _probe_mac_screen() != SATISFIED)
+        if redacted:
+            lines.append(f"DEGRADED  screenshot file ({size:,} bytes) — writes, "
+                         "but Screen Recording is not granted so app WINDOWS are "
+                         "redacted (only the desktop is captured)")
+            shot_ok = False  # a redacted capture is not a working screenshot
+        else:
+            lines.append(f"PASS  screenshot file ({size:,} bytes)")
     except Exception as e:  # noqa: BLE001 — the selftest reports, never raises
         lines.append(f"FAIL  screenshot file ({e})")
         shot_ok = False
