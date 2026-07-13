@@ -28,6 +28,7 @@ import { ControlTools } from "../dist/electron/control/tools.js";
 import { ControlMcp } from "../dist/electron/control/mcp.js";
 import { makeEmitter } from "../dist/electron/control/emit.js";
 import { LogRing } from "../dist/electron/control/logring.js";
+import { registerSurface, unregisterSurface } from "../dist/electron/control/surfaces.js";
 import { LkgStore } from "../dist/electron/control/lkg.js";
 import { removeHeartbeat } from "../dist/electron/control/heartbeat.js";
 import { updateConfigured } from "../dist/electron/control/update-key.js";
@@ -363,6 +364,20 @@ async function bootControlPlane() {
   const bind = await server.bind();
   if (bind.ok) {
     fs.writeFileSync(paths.portFile, String(bind.port) + "\n", { mode: 0o600 });
+    // ADR-060 §3.8 discovery: publish this surface to ~/.windy/surfaces.json so
+    // any agent on the box can find + drive it (removed on will-quit below).
+    registerSurface({
+      product: "windytalk",
+      version: app.getVersion(),
+      class: "desktop",
+      contract: "control.mcp.v1",
+      doctrine: "ADR-060 v1.0",
+      http: `http://127.0.0.1:${bind.port}`,
+      mcp: `http://127.0.0.1:${bind.port}/mcp`,
+      token_path: paths.token,
+      health: "/invoke get_health",
+      pid: process.pid,
+    });
   } else {
     // $port_note: we HOLD instance.lock but can't bind :8782 — a foreign
     // same-user process is squatting. Surface it; NEVER silently bind another
@@ -512,4 +527,7 @@ app.on("will-quit", () => {
   } catch {
     // already gone
   }
+  // ADR-060 §3.8: remove our discovery entry on clean shutdown (a stale entry
+  // is harmless — readers probe before trust — but tidy is better).
+  unregisterSurface("windytalk");
 });
