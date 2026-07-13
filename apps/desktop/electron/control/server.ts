@@ -3,7 +3,7 @@
 //   GET  /ping            -> serving-attesting echo (heartbeat + staleness probe)
 //   POST /instance/hello  -> single-instance ack: focuses the window, echoes pid
 //   GET  /tools           -> the advertised (built) tool list          [slice 1]
-//   POST /invoke          -> {tool, args} -> {ok, result, error}       [slice 1]
+//   POST /invoke          -> {name, arguments} -> {ok, result?|error?}  (ADR-060 §3.2; legacy {tool,args} still accepted)
 //   POST /mcp             -> MCP JSON-RPC (initialize lifecycle, tools) [slice 1]
 //
 // Serving attestation: unlike the Python reference (whose listener lives on a
@@ -140,8 +140,12 @@ export class ControlServer {
       this.readBody(req, res, (body) => {
         const parsed = this.parseJson(body, res);
         if (parsed === undefined) return;
-        const tool = String((parsed as { tool?: unknown }).tool ?? "");
-        const args = ((parsed as { args?: unknown }).args as Record<string, unknown>) ?? {};
+        // ADR-060 §3.2 canonical native shape is {name, arguments} (what the
+        // Loom-woven MCP packet and the conformance live-gate POST). Accept the
+        // legacy {tool, args} too so existing clients/tests don't break.
+        const p = parsed as { name?: unknown; tool?: unknown; arguments?: unknown; args?: unknown };
+        const tool = String(p.name ?? p.tool ?? "");
+        const args = ((p.arguments ?? p.args) as Record<string, unknown>) ?? {};
         void this.opts
           .dispatch!(tool, args)
           .then((out) => {
