@@ -31,13 +31,41 @@ from .base import FocusInfo, HandsBackend, UnsupportedTool, focus_guard
 # fix makes every tool work on a pwsh-only machine.
 _PS_BINARIES = ("powershell", "pwsh")
 
+# Make the PowerShell process system-DPI-aware BEFORE any screen API runs, so
+# CopyFromScreen captures true PHYSICAL pixels and SetCursorPos speaks the same
+# physical space. Without this, a DPI-unaware process at 125-150% scaling (most
+# consumer laptops) gets VIRTUALIZED coordinates: CopyFromScreen can crop the
+# screen to the top-left and any vision-located click lands offset by the scale
+# factor. Both screenshot and mouse must share this so their pixel spaces agree
+# (identity mapping). No-op at 100% scaling. Must precede loading Forms/Drawing.
+_DPI_AWARE = (
+    "Add-Type @'\nusing System;using System.Runtime.InteropServices;\n"
+    "public class WtDpi{[DllImport(\"user32.dll\")]public static extern bool "
+    "SetProcessDPIAware();}\n'@;[WtDpi]::SetProcessDPIAware() | Out-Null;")
+
 _APP_ALIASES = {
     "browser": "msedge", "web browser": "msedge", "chrome": "chrome",
-    "edge": "msedge", "terminal": "wt", "console": "cmd", "files": "explorer",
-    "file manager": "explorer", "explorer": "explorer", "settings": "ms-settings:",
+    "google chrome": "chrome", "firefox": "firefox",
+    "edge": "msedge", "microsoft edge": "msedge",
+    "terminal": "wt", "console": "cmd", "command prompt": "cmd", "cmd": "cmd",
+    "powershell": "powershell", "files": "explorer",
+    "file manager": "explorer", "explorer": "explorer", "file explorer": "explorer",
+    "settings": "ms-settings:",
     "text editor": "notepad", "editor": "notepad", "notepad": "notepad",
     "calculator": "calc", "calc": "calc", "code": "code", "vscode": "code",
-    "mail": "outlookmail:", "paint": "mspaint",
+    "paint": "mspaint",
+    # the apps grandmas actually name (Office desktop + common consumer apps)
+    "word": "winword", "microsoft word": "winword", "ms word": "winword",
+    "excel": "excel", "microsoft excel": "excel", "ms excel": "excel",
+    "powerpoint": "powerpnt", "power point": "powerpnt",
+    "outlook": "outlook", "email": "outlook", "mail": "outlook",
+    "teams": "ms-teams:", "microsoft teams": "ms-teams:",
+    "zoom": "zoom", "photos": "ms-photos:", "photo": "ms-photos:",
+    "camera": "microsoft.windows.camera:", "maps": "bingmaps:",
+    "store": "ms-windows-store:", "microsoft store": "ms-windows-store:",
+    "spotify": "spotify", "whatsapp": "whatsapp", "telegram": "telegram",
+    "solitaire": "xboxliveapp-1297287741:", "clock": "ms-clock:",
+    "task manager": "taskmgr", "control panel": "control", "notepad++": "notepad++",
 }
 
 # friendly key names → SendKeys tokens. Modifiers: ^ ctrl, % alt, + shift.
@@ -76,9 +104,17 @@ def _ps(script: str, timeout: float = 20) -> str:
     if binary is None:
         raise UnsupportedTool("no PowerShell interpreter (powershell / pwsh) on PATH")
     encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    # CREATE_NO_WINDOW: when the app's python runs windowless (pythonw, or an
+    # Electron child with no console), Windows otherwise allocates a NEW visible
+    # console for each PowerShell child — so every hands action (screenshot,
+    # click, type) flashes a black box on the user's screen, AND that console can
+    # sit on top of the very screenshot the action is capturing (live-caught: the
+    # vision spine "couldn't see" Chrome because the _ps console occluded it).
+    # This flag runs PowerShell with no window, ever.
     r = subprocess.run(
         [binary, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
-        capture_output=True, text=True, timeout=timeout)
+        capture_output=True, text=True, timeout=timeout,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     if r.returncode != 0:
         raise RuntimeError((r.stderr or "powershell failed").strip()[:400])
     return (r.stdout or "").strip()
@@ -140,10 +176,62 @@ class WindowsBackend(HandsBackend):
     def open_app(self, name: str) -> str:
         target = _APP_ALIASES.get(name.strip().lower(), name)
         try:
-            _ps(f"Start-Process '{_sq(target)}'")
-            return f"Opening {name}"
+            _ps("Start-Process '" + _sq(target) + "'")  # launch — kept simple/reliable
         except Exception:
             return f"Couldn't find an app called {name!r}."
+        # Then, as a SEPARATE best-effort step that can NEVER fail the launch,
+        # bring the app's window to the FRONT so the next read_screen/click/type
+        # targets IT. Windows' foreground lock otherwise leaves the new window
+        # behind whatever was focused, and the agent acts on the wrong window —
+        # live-confirmed: with the app un-fronted, a following type_text leaked
+        # its text into the still-focused browser.
+        try:
+            self._bring_to_front(target)
+        except Exception:  # noqa: BLE001 — foregrounding is best-effort, never fatal
+            pass
+        return f"Opening {name}"
+
+    def _bring_to_front(self, target: str) -> None:
+        """Foreground the newest visible window of the process matching `target`.
+        Zeroing the foreground-lock timeout + a synthetic Alt keypress is what
+        lets a background caller's SetForegroundWindow be honored. URI/UWP
+        targets expose no matching process — they self-activate, so no-match is
+        fine."""
+        base = target.rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
+        if base.lower().endswith(".exe"):
+            base = base[:-4]
+        if not base or base.endswith(":"):
+            return  # protocol/URI launcher — nothing to match; it self-activates
+        # NB: do NOT nudge with a synthetic Alt keypress to unlock the
+        # foreground — Alt activates the target app's MENU BAR, so the following
+        # type_text/press_keys goes to the menu instead of the content (live-
+        # caught: a Ctrl+Z landed on Notepad's File menu). Attach this thread's
+        # input to the current foreground thread instead, which lets
+        # SetForegroundWindow through with no key side-effects.
+        script = (
+            "Add-Type @'\nusing System;using System.Runtime.InteropServices;\n"
+            "public class Fg{"
+            "[DllImport(\"user32.dll\")]public static extern bool SetForegroundWindow(IntPtr h);"
+            "[DllImport(\"user32.dll\")]public static extern bool BringWindowToTop(IntPtr h);"
+            "[DllImport(\"user32.dll\")]public static extern bool ShowWindow(IntPtr h,int c);"
+            "[DllImport(\"user32.dll\")]public static extern IntPtr GetForegroundWindow();"
+            "[DllImport(\"user32.dll\")]public static extern uint GetWindowThreadProcessId(IntPtr h,IntPtr p);"
+            "[DllImport(\"user32.dll\")]public static extern bool AttachThreadInput(uint a,uint b,bool f);"
+            "[DllImport(\"kernel32.dll\")]public static extern uint GetCurrentThreadId();"
+            "[DllImport(\"user32.dll\")]public static extern bool SystemParametersInfo(uint a,uint p,IntPtr v,uint f);}\n'@;"
+            "[Fg]::SystemParametersInfo(0x2001,0,[IntPtr]::Zero,0) | Out-Null;"
+            "Start-Sleep -Milliseconds 900;"
+            "$w=Get-Process -ErrorAction SilentlyContinue | "
+            "Where-Object {$_.MainWindowHandle -ne 0 -and $_.ProcessName -like '*" + _sq(base) + "*'} | "
+            "Sort-Object StartTime -Descending | Select-Object -First 1;"
+            "if($w -ne $null){$h=$w.MainWindowHandle;"
+            "$cur=[Fg]::GetCurrentThreadId();"
+            "$fgt=[Fg]::GetWindowThreadProcessId([Fg]::GetForegroundWindow(),[IntPtr]::Zero);"
+            "[Fg]::AttachThreadInput($cur,$fgt,$true)|Out-Null;"
+            "[Fg]::ShowWindow($h,9)|Out-Null;[Fg]::BringWindowToTop($h)|Out-Null;"
+            "[Fg]::SetForegroundWindow($h)|Out-Null;"
+            "[Fg]::AttachThreadInput($cur,$fgt,$false)|Out-Null}")
+        _ps(script, timeout=8)
 
     def open_url(self, url: str) -> str:
         if not url.startswith(("http://", "https://")):
@@ -186,6 +274,7 @@ class WindowsBackend(HandsBackend):
         lx, ly = self._map_capture_point(x, y)
         down, up = ("0x0008", "0x0010") if button == "right" else ("0x0002", "0x0004")
         _ps(
+            _DPI_AWARE +
             "Add-Type @'\nusing System;using System.Runtime.InteropServices;\n"
             "public class M{[DllImport(\"user32.dll\")]public static extern bool SetCursorPos(int x,int y);"
             "[DllImport(\"user32.dll\")]public static extern void mouse_event(uint f,uint dx,uint dy,uint d,int e);}\n'@;"
@@ -261,6 +350,7 @@ class WindowsBackend(HandsBackend):
             name += ".png"
         dest = str(shots / name).replace("\\", "\\\\").replace("'", "''")
         _ps(
+            _DPI_AWARE +
             "Add-Type -AssemblyName System.Windows.Forms,System.Drawing;"
             "$b=[System.Windows.Forms.SystemInformation]::VirtualScreen;"
             "$bmp=New-Object System.Drawing.Bitmap($b.Width,$b.Height);"
