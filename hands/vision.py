@@ -41,6 +41,7 @@ DEFAULT_TIMEOUT = 90.0   # cold model load + a thinking pass both fit (live: ~30
 # truncated every long locate until the served model carried num_ctx 16384
 # (the windy-locator derived model on the 5090).
 MAX_TOKENS = 8000
+USER_AGENT = "windytalk/1.0"  # never the urllib default (CF WAF 403s Python-urllib/*)
 
 # NORMALIZED 0-1000 bounding box, never absolute pixels. Live-measured
 # (qwen3-vl:32b via ollama, 2026-07-12): the serving stack resizes the image
@@ -96,6 +97,7 @@ class VisionLocator:
             f"{self.base_url}/chat/completions",
             data=json.dumps(body).encode(),
             headers={"Content-Type": "application/json",
+                     "User-Agent": USER_AGENT,
                      **({"Authorization": f"Bearer {self.api_key}"} if self.api_key else {})},
             method="POST")
         with urllib.request.urlopen(req, timeout=self.timeout) as resp:
