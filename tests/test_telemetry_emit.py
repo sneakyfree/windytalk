@@ -80,4 +80,22 @@ def test_never_raises_on_garbage(monkeypatch):
 
 
 def test_send_timeout_is_within_budget():
-    assert emit_mod.TIMEOUT_S <= 0.2
+    # Wire timeout is bounded (lossy-by-design), but the ≤200ms genome budget
+    # applies to the CALLER, which only enqueues onto a daemon thread.
+    assert emit_mod.TIMEOUT_S <= 5.0
+
+
+def test_emit_caller_never_blocks_on_slow_network(monkeypatch):
+    # The voice-loop-facing budget: emit() must return ~instantly even when
+    # the network send would take the full wire timeout.
+    import time
+
+    def slow_send(url, token, body):
+        time.sleep(emit_mod.TIMEOUT_S)
+        return None
+
+    monkeypatch.setenv("WINDYTALK_TELEMETRY_TOKEN", "t")
+    monkeypatch.setattr(emit_mod, "_send", slow_send)
+    t0 = time.monotonic()
+    emit_mod.emit("session.start", session_id="s1")
+    assert time.monotonic() - t0 < 0.2

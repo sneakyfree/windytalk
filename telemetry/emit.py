@@ -18,7 +18,13 @@ import threading
 import urllib.request
 
 DEFAULT_URL = "https://admin.windyword.ai/v1/events"
-TIMEOUT_S = 0.2  # hard ceiling per the genome: ≤200 ms, then give up silently
+# Wire timeout for one send. The genome's ≤200ms budget is about never blocking
+# the voice loop — sends run on daemon threads, so the CALLER budget stays ~0
+# regardless. 200ms on the wire proved impossible post-VPS-migration (TLS
+# handshake alone to admin.windyword.ai = 320-420ms from Fort Anne; measured
+# 2026-07-15: 100/100 events dropped). 1.5s delivers while staying lossy-by-
+# design on a truly dead network.
+TIMEOUT_S = float(os.environ.get("WINDYTALK_TELEMETRY_TIMEOUT", "1.5"))
 USER_AGENT = "windytalk/1.0"  # never the urllib default (CF WAF 403s Python-urllib/*)
 
 _SERVICE = "windytalk"
