@@ -31,6 +31,7 @@ from .base import BrainEvent, BrainProvider, ToolCall
 DEFAULT_BASE = "https://api.windymind.ai/v1"
 DEFAULT_MODEL = "llama-3.3-70b-versatile"  # fast, consistent TTFT (PROBE_RESULTS)
 DEFAULT_TIMEOUT = 30.0
+USER_AGENT = "windytalk/1.0"  # never the urllib default (CF WAF 403s Python-urllib/*)
 
 
 class MindBrain(BrainProvider):
@@ -54,7 +55,9 @@ class MindBrain(BrainProvider):
             data=json.dumps(body).encode(),
             headers={"Authorization": f"Bearer {self.api_key}",
                      "Content-Type": "application/json",
-                     "Accept": "text/event-stream"},
+                     "Accept": "text/event-stream",
+                     # explicit UA: CF WAF on api.windymind.ai 403s default Python-urllib/*
+                     "User-Agent": USER_AGENT},
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=self.timeout) as resp:

@@ -19,6 +19,7 @@ import urllib.request
 
 DEFAULT_URL = "https://admin.windyword.ai/v1/events"
 TIMEOUT_S = 0.2  # hard ceiling per the genome: ≤200 ms, then give up silently
+USER_AGENT = "windytalk/1.0"  # never the urllib default (CF WAF 403s Python-urllib/*)
 
 _SERVICE = "windytalk"
 _PLATFORM = "windy-talk"
@@ -73,7 +74,8 @@ def _send(url: str, token: str, body: bytes) -> int | None:
             url,
             data=body,
             headers={"Authorization": f"Bearer {token}",
-                     "Content-Type": "application/json"},
+                     "Content-Type": "application/json",
+                     "User-Agent": USER_AGENT},
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=TIMEOUT_S) as resp:
