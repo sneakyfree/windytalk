@@ -26,10 +26,37 @@ DEFAULT_MAX_UTTER_MS = 30000   # hard cap: force EOS even if silence never arriv
 IsSpeech = Callable[[bytes, int], bool]
 
 
+def _energy_is_speech(threshold_rms: float | None = None) -> IsSpeech:
+    """Pure-python RMS-energy speech gate — the fallback when webrtcvad's C
+    extension can't be built/installed (e.g. cp314 Windows has no wheel and no
+    MSVC). Less discriminating than webrtcvad, but it drives the turn loop and
+    keeps the CPU engine wheel-only. Threshold is env-tunable."""
+    import os
+
+    import numpy as np
+    thr = threshold_rms if threshold_rms is not None else float(
+        os.environ.get("WINDYTALK_VAD_ENERGY_THRESHOLD", "300"))
+
+    def is_speech(frame: bytes, sample_rate: int) -> bool:
+        if not frame:
+            return False
+        samples = np.frombuffer(frame, dtype=np.int16).astype(np.float32)
+        if samples.size == 0:
+            return False
+        return float(np.sqrt(np.mean(samples * samples))) >= thr
+
+    return is_speech
+
+
 def _default_is_speech(aggressiveness: int = 2) -> IsSpeech:
-    import webrtcvad  # lazy: C extension
-    vad = webrtcvad.Vad(aggressiveness)
-    return vad.is_speech
+    try:
+        import webrtcvad  # lazy: C extension (no prebuilt wheel on some platforms)
+        vad = webrtcvad.Vad(aggressiveness)
+        return vad.is_speech
+    except Exception:
+        # No webrtcvad build available — fall back to the energy gate so the
+        # engine still runs (WINDYTALK_VAD_ENERGY_THRESHOLD tunes sensitivity).
+        return _energy_is_speech()
 
 
 class Segmenter:
