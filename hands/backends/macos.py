@@ -103,6 +103,24 @@ def _quartz_available() -> bool:
     return importlib.util.find_spec("Quartz") is not None
 
 
+def _screen_recording_ok() -> bool | None:
+    """Is Screen Recording (TCC) granted to this context? Without it,
+    `screencapture` silently writes a wallpaper-only image with every app
+    window REDACTED — an ok:true that is visually blind. CGPreflightScreen
+    CaptureAccess reports the permission WITHOUT prompting and, being a
+    permission check (not a capture), never false-negatives on display sleep.
+    Returns None when we can't tell (no pyobjc / symbol absent) so the caller
+    falls back to presence rather than a false red."""
+    try:
+        from Quartz import CGPreflightScreenCaptureAccess
+    except Exception:
+        return None
+    try:
+        return bool(CGPreflightScreenCaptureAccess())
+    except Exception:
+        return None
+
+
 def _quartz_click(x: int, y: int, button: str) -> None:
     import Quartz  # pyobjc — a native mouse path that needs neither cliclick nor AX
     right = button == "right"
@@ -171,6 +189,11 @@ class MacOSBackend(HandsBackend):
         has_osa = _which("osascript") is not None
         has_open = _which("open") is not None
         has_shot = _which("screencapture") is not None
+        # screencapture present but Screen Recording UNGRANTED = redacted-blind
+        # captures (wallpaper only). Honor an explicit TCC "no"; on unknown
+        # (None → no pyobjc) fall back to binary presence so we don't false-red.
+        rec_ok = _screen_recording_ok()
+        shot_usable = has_shot and rec_ok is not False
         has_quartz = _quartz_available()
         # type/press work via cliclick OR the built-in osascript keystroke path;
         # mouse/scroll via cliclick OR pyobjc-Quartz. So a stock Mac (no cliclick)
@@ -185,7 +208,7 @@ class MacOSBackend(HandsBackend):
             "type_text": keyboard and has_osa, "press_keys": keyboard,
             "mouse_click": pointer, "scroll": pointer,
             "click_element": has_osa, "read_screen": has_osa, "list_apps": has_osa,
-            "screenshot": has_shot, "run_shell": True,
+            "screenshot": shot_usable, "run_shell": True,
         }
 
     # -- apps / web ------------------------------------------------------------
@@ -311,18 +334,25 @@ class MacOSBackend(HandsBackend):
 
     def click_element(self, label: str) -> str:
         want = _osa_str(label.strip())
+        # Match across name/description/title/value, not just name: many AX
+        # controls (Calculator keys, image/toolbar buttons) carry their human
+        # label in AXDescription, not AXName. Each attribute goes in its own
+        # `try` so an element that lacks one doesn't abort the whole match, and
+        # buttons are tried before generic UI elements (more specific first).
+        clauses = []
+        for kind in ("button", "UI element"):
+            for attr in ("name", "description", "title", "value"):
+                clauses.append(
+                    ' try\n'
+                    f'  click (first {kind} of front window of p '
+                    f'whose {attr} is "{want}")\n'
+                    '  return "clicked"\n'
+                    ' end try\n')
         script = (
             'tell application "System Events"\n'
             ' set p to first process whose frontmost is true\n'
-            ' try\n'
-            f'  click (first button of front window of p whose name is "{want}")\n'
-            '  return "clicked"\n'
-            ' end try\n'
-            ' try\n'
-            f'  click (first UI element of front window of p whose name is "{want}")\n'
-            '  return "clicked"\n'
-            ' end try\n'
-            ' return "notfound"\n'
+            + "".join(clauses)
+            + ' return "notfound"\n'
             'end tell')
         try:
             r = _osa(script, timeout=12)
@@ -350,6 +380,12 @@ class MacOSBackend(HandsBackend):
         # Remember this capture's geometry: subsequent mouse_click coords are
         # pixels of THIS image (2x points on Retina) and get mapped back.
         self._last_capture = geometry_for(dest, _logical_size())
+        if _screen_recording_ok() is False:
+            # The file exists but every app window is redacted to wallpaper —
+            # say so instead of a misleading "Saved" (the vision spine is blind).
+            return (f"Saved screenshot to {dest}, but Screen Recording permission "
+                    "is not granted — app windows are redacted (wallpaper only). "
+                    "Grant it in System Settings → Privacy & Security → Screen Recording.")
         return f"Saved screenshot to {dest}"
 
     def run_shell(self, command: str) -> str:
