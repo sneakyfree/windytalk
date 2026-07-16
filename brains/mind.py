@@ -33,6 +33,25 @@ DEFAULT_MODEL = "llama-3.3-70b-versatile"  # fast, consistent TTFT (PROBE_RESULT
 DEFAULT_TIMEOUT = 30.0
 USER_AGENT = "windytalk/1.0"  # never the urllib default (CF WAF 403s Python-urllib/*)
 
+_SSL_CTX = None
+
+
+def _https_ctx():
+    """TLS context with a real CA bundle. Homebrew/macOS Python ships urllib
+    with cafile=None, so every HTTPS call fails cert verification and the brain
+    silently falls back to 'trouble reaching my brain' (found on the OC5 CPU
+    engine 2026-07-16). Prefer certifi; fall back to the default (fine where
+    system certs work, e.g. Linux/Windows)."""
+    global _SSL_CTX
+    if _SSL_CTX is None:
+        import ssl
+        try:
+            import certifi
+            _SSL_CTX = ssl.create_default_context(cafile=certifi.where())
+        except Exception:
+            _SSL_CTX = ssl.create_default_context()
+    return _SSL_CTX
+
 
 class MindBrain(BrainProvider):
     name = "mind"
@@ -60,7 +79,7 @@ class MindBrain(BrainProvider):
                      "User-Agent": USER_AGENT},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+        with urllib.request.urlopen(req, timeout=self.timeout, context=_https_ctx()) as resp:
             for raw in resp:
                 yield raw.decode("utf-8", "replace").rstrip("\r\n")
 
