@@ -1,6 +1,6 @@
 {
   "manifest": "windytalk-cocktail.common.v1",
-  "doctrine": "Fat installer. Ship EVERYTHING any variant of the target OS could need. Bring-your-own-runtime: the app NEVER uses the machine's Python or Node — it carries frozen private copies, identical on every machine forever. The only borrowed pieces are OS permanent built-ins that cannot be missing. Detection is used to WIRE and VERIFY at first run and to pick a working mechanism at runtime — never to decide what ships. Nothing is ever downloaded at runtime. Full doctrine: docs/PACKAGING.md.",
+  "doctrine": "Fat installer. Ship EVERYTHING any variant of the target OS could need. Bring-your-own-runtime: the app NEVER uses the machine's Python or Node \u2014 it carries frozen private copies, identical on every machine forever. The only borrowed pieces are OS permanent built-ins that cannot be missing. Detection is used to WIRE and VERIFY at first run and to pick a working mechanism at runtime \u2014 never to decide what ships. Nothing is ever downloaded at runtime. Full doctrine: docs/PACKAGING.md.",
   "runtimes": {
     "electron": {
       "provided_by": "bundled",
@@ -14,8 +14,16 @@
     }
   },
   "python_packages": [
-    { "package": "numpy", "import_name": "numpy", "profile": "core" },
-    { "package": "websockets", "import_name": "websockets", "profile": "core" },
+    {
+      "package": "numpy",
+      "import_name": "numpy",
+      "profile": "core"
+    },
+    {
+      "package": "websockets",
+      "import_name": "websockets",
+      "profile": "core"
+    },
     {
       "package": "faster-whisper",
       "import_name": "faster_whisper",
@@ -38,7 +46,12 @@
       "package": "webrtcvad",
       "import_name": "webrtcvad",
       "profile": "engine-local",
-      "note": "voice-activity detection (engine/vad.py); C extension, lazily imported — CAUGHT BY THE DRIFT TEST on its first run, proof the manifests self-enforce"
+      "note": "voice-activity detection (engine/vad.py); C extension, lazily imported \u2014 CAUGHT BY THE DRIFT TEST on its first run, proof the manifests self-enforce"
+    },
+    {
+      "import_name": "certifi",
+      "package": "certifi",
+      "profile": "core"
     }
   ],
   "payload_profiles": {

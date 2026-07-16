@@ -43,6 +43,22 @@ DEFAULT_TIMEOUT = 90.0   # cold model load + a thinking pass both fit (live: ~30
 MAX_TOKENS = 8000
 USER_AGENT = "windytalk/1.0"  # never the urllib default (CF WAF 403s Python-urllib/*)
 
+_SSL_CTX = None
+
+
+def _https_ctx():
+    """CA-bundle TLS context — Homebrew/macOS urllib has cafile=None (every
+    HTTPS call fails verification). Prefer certifi, else default."""
+    global _SSL_CTX
+    if _SSL_CTX is None:
+        import ssl
+        try:
+            import certifi
+            _SSL_CTX = ssl.create_default_context(cafile=certifi.where())
+        except Exception:
+            _SSL_CTX = ssl.create_default_context()
+    return _SSL_CTX
+
 # NORMALIZED 0-1000 bounding box, never absolute pixels. Live-measured
 # (qwen3-vl:32b via ollama, 2026-07-12): the serving stack resizes the image
 # before the model sees it (~1024x1024, aspect NOT preserved), so pixel answers
@@ -100,7 +116,7 @@ class VisionLocator:
                      "User-Agent": USER_AGENT,
                      **({"Authorization": f"Bearer {self.api_key}"} if self.api_key else {})},
             method="POST")
-        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+        with urllib.request.urlopen(req, timeout=self.timeout, context=_https_ctx()) as resp:
             doc = json.loads(resp.read())
         return doc["choices"][0]["message"]["content"]
 

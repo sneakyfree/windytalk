@@ -27,6 +27,22 @@ DEFAULT_URL = "https://admin.windyword.ai/v1/events"
 TIMEOUT_S = float(os.environ.get("WINDYTALK_TELEMETRY_TIMEOUT", "1.5"))
 USER_AGENT = "windytalk/1.0"  # never the urllib default (CF WAF 403s Python-urllib/*)
 
+_SSL_CTX = None
+
+
+def _https_ctx():
+    """CA-bundle TLS context — Homebrew/macOS urllib has cafile=None (every
+    HTTPS call fails verification). Prefer certifi, else default."""
+    global _SSL_CTX
+    if _SSL_CTX is None:
+        import ssl
+        try:
+            import certifi
+            _SSL_CTX = ssl.create_default_context(cafile=certifi.where())
+        except Exception:
+            _SSL_CTX = ssl.create_default_context()
+    return _SSL_CTX
+
 _SERVICE = "windytalk"
 _PLATFORM = "windy-talk"
 
@@ -84,7 +100,7 @@ def _send(url: str, token: str, body: bytes) -> int | None:
                      "User-Agent": USER_AGENT},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=TIMEOUT_S) as resp:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_S, context=_https_ctx()) as resp:
             return resp.status
     except Exception:
         return None
