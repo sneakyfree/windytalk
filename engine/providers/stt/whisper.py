@@ -20,11 +20,15 @@ from .base import MIC_RATE, STTProvider, Transcript
 class WhisperSTT(STTProvider):
     name = "whisper"
 
-    def __init__(self, size: str | None = None, device: str = "cuda",
-                 compute_type: str = "float16") -> None:
+    def __init__(self, size: str | None = None, device: str | None = None,
+                 compute_type: str | None = None) -> None:
         self.size = size or os.environ.get("WINDYTALK_WHISPER", "base")
-        self.device = device
-        self.compute_type = compute_type
+        # Default to the 5090/CUDA path, but let a GPU-less host (e.g. the
+        # co-located agent-brain engine on the user's own machine) select CPU
+        # via env: WINDYTALK_WHISPER_DEVICE=cpu + WINDYTALK_WHISPER_COMPUTE=int8.
+        self.device = device or os.environ.get("WINDYTALK_WHISPER_DEVICE", "cuda")
+        self.compute_type = compute_type or os.environ.get(
+            "WINDYTALK_WHISPER_COMPUTE", "float16")
         self._model = None
 
     def warmup(self) -> None:
