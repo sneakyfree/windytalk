@@ -163,18 +163,86 @@ async def test_client_barge_in_false_positive_resumes():
 
 
 @pytest.mark.asyncio
-async def test_engine_detected_barge_after_60ms_voiced():
+async def test_engine_detected_barge_after_sustained_voiced():
     s = make_session(FakeBrain([[BrainEvent(kind="text", text="reply")]]))
     await s.start()
     s.mic_on = True
     s.state = "speaking"
+    s._speaking_since = 0.0        # far in the past → past the grace window
     s._active_say_id = 2
     s._turn_task = asyncio.ensure_future(asyncio.sleep(5))
-    # 3 voiced 20 ms frames = 60 ms → confirm
-    for _ in range(3):
+    # sustained voiced past the (raised) confirm threshold → barge confirms
+    for _ in range(s._barge_confirm_ms // 20 + 1):
         await s.on_mic_frame(_voiced())
     assert s.state == "listening"
     assert any(e["type"] == "say_cancel" for e in s._events)
+
+
+@pytest.mark.asyncio
+async def test_barge_grace_protects_start_of_speech():
+    # The #1 first-voice-session bug: speaker echo / trailing user speech must not
+    # cancel a reply the instant it starts. During the grace window, even sustained
+    # voiced frames do not barge.
+    s = make_session(FakeBrain([[BrainEvent(kind="text", text="reply")]]))
+    await s.start()
+    s.mic_on = True
+    s.state = "speaking"
+    loop = asyncio.get_running_loop()
+    s._speaking_since = loop.time()   # speaking JUST started
+    s._active_say_id = 2
+    s._turn_task = asyncio.ensure_future(asyncio.sleep(5))
+    for _ in range(s._barge_confirm_ms // 20 + 5):   # more than enough voiced
+        await s.on_mic_frame(_voiced())
+    assert s.state == "speaking"      # grace held — no self-cancel
+    assert not any(e["type"] == "say_cancel" for e in s._events)
+    s._turn_task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_thinking_utterance_supersedes_turn():
+    # "You're two questions behind": a full utterance spoken while the brain is
+    # still working must abandon the in-flight turn and start a fresh one.
+    class SlowBrain:
+        def __init__(self): self.calls = 0
+        def stream(self, messages, tools=None, model=None):
+            self.calls += 1
+            yield BrainEvent(kind="text", text="old answer")
+            yield BrainEvent(kind="done", finish_reason="stop")
+
+    s = make_session(SlowBrain(), stt=FakeSTT(text="the new question"))
+    await s.start()
+    await s.on_mic(True)
+    s.state = "thinking"              # simulate an in-flight turn
+    s.turn_id = 1
+    prior = asyncio.ensure_future(asyncio.sleep(5))
+    s._turn_task = prior
+    # speak a complete utterance while thinking
+    for _ in range(10):
+        await s.on_mic_frame(_voiced())
+    for _ in range(36):
+        await s.on_mic_frame(_silent())
+    assert prior.cancelled() or prior.done()   # old turn was superseded
+    if s._turn_task:
+        await s._turn_task
+    heard = [e for e in s._events if e["type"] == "heard"]
+    assert any(e["text"] == "the new question" for e in heard)
+
+
+@pytest.mark.asyncio
+async def test_think_supersede_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("WINDYTALK_NO_THINK_SUPERSEDE", "1")
+    s = make_session(FakeBrain([[BrainEvent(kind="text", text="x")]]))
+    await s.start()
+    await s.on_mic(True)
+    s.state = "thinking"
+    prior = asyncio.ensure_future(asyncio.sleep(5))
+    s._turn_task = prior
+    for _ in range(10):
+        await s.on_mic_frame(_voiced())
+    for _ in range(36):
+        await s.on_mic_frame(_silent())
+    assert not prior.done()          # nothing superseded; old turn untouched
+    prior.cancel()
 
 
 @pytest.mark.asyncio
