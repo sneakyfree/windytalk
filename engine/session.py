@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import os
 import re
 import struct
 import threading
@@ -40,6 +41,22 @@ _AUDIO_FRAME_BYTES = TTS_RATE * _AUDIO_FRAME_MS // 1000 * 2  # 960
 _BARGE_CONFIRM_MS = 60           # §7.3 voiced to confirm a barge (within the window)
 _BARGE_VERDICT_MS = 250          # §7.3 engine must reply within 250 ms
 _BARGE_DECAY_MS = 100            # a silence gap this long resets the voiced tally
+# Real-room calibration (2026-07-22 first-voice-session findings): the contract's
+# 60 ms confirm assumes AEC-clean mic frames; with speaker→mic echo it self-
+# cancelled 49/58 replies. So (a) a start-of-speech grace where NO barge can fire,
+# and (b) a higher sustained-voiced confirm — both env-tunable to calibrate against
+# the live acoustic loop without a redeploy. Defaults are conservative (favor
+# letting Windy finish) since a missed barge just means one late interrupt, but a
+# false barge eats the whole answer.
+_BARGE_GRACE_MS = 600            # each speaking phase is un-interruptible this long
+_BARGE_CONFIRM_MS_DEFAULT = 240  # sustained voiced needed once past the grace window
+
+
+def _env_ms(name: str, default: int) -> int:
+    try:
+        return max(0, int(os.environ[name]))
+    except (KeyError, ValueError):
+        return default
 _MIC_FRAME_BYTES = 16000 * FRAME_MS // 1000 * 2  # 640
 _LEVEL_EVERY = 2                 # emit `level` every N audio chunks (~25 Hz)
 _FALLBACK_LINE = "Sorry, I'm having trouble reaching my brain right now."
@@ -72,6 +89,15 @@ class VoiceSession:
         self._barge_unvoiced_run = 0            # consecutive unvoiced frames (decay window)
         self._barge_frames: list[bytes] = []   # frames captured during a barge (carried to new turn)
         self._barge_verdict: asyncio.Task | None = None
+        self._barge_grace_ms = _env_ms("WINDYTALK_BARGE_GRACE_MS", _BARGE_GRACE_MS)
+        self._barge_confirm_ms = _env_ms("WINDYTALK_BARGE_CONFIRM_MS", _BARGE_CONFIRM_MS_DEFAULT)
+        self._speaking_since: float = 0.0       # monotonic start of the current speaking phase
+        # A second segmenter that runs while THINKING so a new utterance spoken
+        # mid-processing (before Windy speaks) supersedes the in-flight turn
+        # instead of vanishing — the "you're two questions behind" fix. Disabled
+        # with WINDYTALK_NO_THINK_SUPERSEDE=1.
+        self._think_seg = self._fresh_seg()
+        self._think_supersede = os.environ.get("WINDYTALK_NO_THINK_SUPERSEDE") != "1"
         self._history: list[dict] = []
         self._tool_futures: dict[str, asyncio.Future] = {}
 
@@ -158,26 +184,45 @@ class VoiceSession:
                 await self._start_turn(utter_pcm=utter)
                 return
         elif self.state == "speaking":
-            # engine-detected barge-in (§7.5): ≥60 ms cumulative voiced cuts speech.
+            # engine-detected barge-in (§7.5): sustained voiced cuts speech.
             fb = _MIC_FRAME_BYTES
             voiced = len(pcm) >= fb and self._seg._is_speech(pcm[:fb], 16000)
             self._barge_frames.append(pcm)          # keep for carrying into the new turn
             if len(self._barge_frames) > 40:
                 self._barge_frames.pop(0)
+            # A client-SIGNALED barge (verdict window open) = the user's own onset
+            # detector fired = explicit intent → honor it at the contract's 60 ms
+            # and skip the grace. The AUTONOMOUS path (no client signal) is the one
+            # that echo/tail-speech trips, so it gets the start-of-speech grace and
+            # the higher sustained threshold — the fix for "only the first word came
+            # out" without weakening a real interrupt.
+            client_signaled = self._barge_verdict is not None
+            loop = self.loop or asyncio.get_running_loop()
+            in_grace = (loop.time() - self._speaking_since) * 1000 < self._barge_grace_ms
+            if in_grace and not client_signaled:
+                return
             if voiced:
                 self._barge_voiced_ms += FRAME_MS
                 self._barge_unvoiced_run = 0
-                if self._barge_voiced_ms >= _BARGE_CONFIRM_MS:
+                threshold = _BARGE_CONFIRM_MS if client_signaled else self._barge_confirm_ms
+                if self._barge_voiced_ms >= threshold:
                     await self._confirm_barge()
             else:
                 # Decay: a silence gap resets the tally so sparse false-voiced frames
                 # (imperfect AEC, background noise) spread across a long reply can't
-                # accumulate to a spurious barge. §7.3 wants ≥60 ms voiced *within*
-                # the decision window, not cumulative over the whole speaking phase.
+                # accumulate to a spurious barge — the confirm needs SUSTAINED voiced.
                 self._barge_unvoiced_run += 1
                 if self._barge_unvoiced_run * FRAME_MS >= _BARGE_DECAY_MS:
                     self._barge_voiced_ms = 0
-        # thinking/idle/paused: frames feed VAD only (dropped, §6/§11.4)
+        elif self.state == "thinking" and self._think_supersede:
+            # A full new utterance spoken while the brain/tools are still running
+            # supersedes the in-flight turn (nothing is playing yet, so no echo
+            # risk). Fixes "I moved on and you kept answering the old question."
+            for utter in self._think_seg.push(pcm):
+                self._think_seg = self._fresh_seg()
+                await self._start_turn(utter_pcm=utter)
+                return
+        # idle/paused: frames feed VAD only (dropped, §6/§11.4)
 
     # -- turn orchestration ----------------------------------------------------
 
@@ -191,6 +236,7 @@ class VoiceSession:
         self._barge_voiced_ms = 0
         self._barge_unvoiced_run = 0
         self._barge_frames = []
+        self._think_seg = self._fresh_seg()
         # Enter "thinking" internally (so no second utterance races in) but DON'T
         # emit it yet — §6 requires heard{final} to precede state{thinking} on the
         # wire, and on the mic path the transcript isn't known until STT runs inside
@@ -333,6 +379,7 @@ class VoiceSession:
             await self._set_state("speaking")
             self._barge_voiced_ms = 0
             self._barge_unvoiced_run = 0
+            self._speaking_since = (self.loop or asyncio.get_running_loop()).time()
         n = 0
         for i in range(0, len(pcm), _AUDIO_FRAME_BYTES):
             chunk = pcm[i:i + _AUDIO_FRAME_BYTES]
