@@ -69,8 +69,11 @@ class HandsSurface:
         try:
             result = fn(**call_args)
             return {"ok": True, "result": result}
-        except UnsupportedTool:
-            return {"ok": False, "error": "unsupported"}
+        except UnsupportedTool as e:
+            # Keep the stable "unsupported" prefix (tri-state contract) but carry
+            # run_chain's cause — a masked bare "unsupported" cost a full live
+            # session not knowing WHY press_keys was dead (2026-07-22 round 2).
+            return {"ok": False, "error": f"unsupported: {e}"}
         except GuardRefused as e:
             # The focus-guard declined to inject keystrokes (nothing was typed).
             # A stable prefix so agents can distinguish "refused for safety" from

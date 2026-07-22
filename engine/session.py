@@ -99,6 +99,7 @@ class VoiceSession:
         self._think_seg = self._fresh_seg()
         self._think_supersede = os.environ.get("WINDYTALK_NO_THINK_SUPERSEDE") != "1"
         self._history: list[dict] = []
+        self._partial_reply: list[str] = []
         self._tool_futures: dict[str, asyncio.Future] = {}
 
     # -- lifecycle -------------------------------------------------------------
@@ -258,10 +259,18 @@ class VoiceSession:
                              "turn_id": self.turn_id})
             await self._set_state("thinking")  # §6: announced AFTER heard{final}
             self._history.append({"role": "user", "content": user_text})
+            self._partial_reply = []
             reply = await self._stream_and_speak()
             if reply:
                 self._history.append({"role": "assistant", "content": reply})
         except asyncio.CancelledError:
+            # A cancelled (barged/superseded) reply must still enter history —
+            # otherwise the brain has no memory it ever answered and confabulates
+            # ("I'm a text-only assistant") when the user asks why it went quiet.
+            partial = " ".join(self._partial_reply).strip()
+            if partial:
+                self._history.append({"role": "assistant", "content":
+                                      partial + " [interrupted by the user before finishing]"})
             raise
         except Exception:
             await self._speak_fallback()
@@ -273,7 +282,7 @@ class VoiceSession:
         """Drive the brain (with tool rounds), sentence-chunk, speak. Returns the
         full spoken reply text (for history), or '' if nothing was spoken."""
         messages = self._build_messages()
-        reply_parts: list[str] = []
+        reply_parts = self._partial_reply  # shared: a cancelled turn still records what it spoke
         for _round in range(6):  # bounded tool rounds
             buf = ""
             tool_calls = []
@@ -351,7 +360,10 @@ class VoiceSession:
                 loop.call_soon_threadsafe(q.put_nowait, BrainEvent(kind="error",
                                                                    message="brain stream failed"))
             finally:
-                loop.call_soon_threadsafe(q.put_nowait, sentinel)
+                try:
+                    loop.call_soon_threadsafe(q.put_nowait, sentinel)
+                except RuntimeError:
+                    pass  # loop already closed (turn cancelled + session gone)
 
         threading.Thread(target=pump, daemon=True).start()
         try:

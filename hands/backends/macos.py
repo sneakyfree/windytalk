@@ -20,7 +20,7 @@ from __future__ import annotations
 import importlib.util
 import shutil
 import subprocess
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse
 
 from ..coords import geometry_for
 from .base import FocusInfo, HandsBackend, Mechanism, focus_guard, run_chain
@@ -228,8 +228,46 @@ class MacOSBackend(HandsBackend):
     def open_url(self, url: str) -> str:
         if not url.startswith(("http://", "https://")):
             url = "https://" + url
+        # Reuse before spawn: repeated open_url calls for the same site piled up
+        # 4 identical Calendar tabs in one live session. If Chrome is running and
+        # already has a tab on this host, focus it and point it at the new URL;
+        # otherwise fall through to `open` (default browser, correct when Chrome
+        # isn't running or isn't the browser in use).
+        host = urlparse(url).hostname or ""
+        if host and self._chrome_focus_or_open(url, host):
+            return f"Opening {url} (reused the existing {host} tab)"
         subprocess.run(["open", url], check=True, capture_output=True, timeout=10)
         return f"Opening {url}"
+
+    def _chrome_focus_or_open(self, url: str, host: str) -> bool:
+        """Focus Chrome's existing tab for `host` (navigating it to `url`) and
+        bring Chrome forward. False = Chrome not running / no such tab / error."""
+        script = (
+            'tell application "System Events" to set chromeUp to '
+            '(name of processes) contains "Google Chrome"\n'
+            'if not chromeUp then return "no"\n'
+            'tell application "Google Chrome"\n'
+            ' set wi to 1\n'
+            ' repeat with w in windows\n'
+            '  set ti to 1\n'
+            '  repeat with t in tabs of w\n'
+            f'  if URL of t contains "://{host}" or URL of t contains ".{host}" then\n'
+            f'   set URL of t to "{url}"\n'
+            '   set active tab index of w to ti\n'
+            '   set index of w to 1\n'
+            '   activate\n'
+            '   return "reused"\n'
+            '  end if\n'
+            '  set ti to ti + 1\n'
+            '  end repeat\n'
+            '  set wi to wi + 1\n'
+            ' end repeat\n'
+            'end tell\n'
+            'return "no"')
+        try:
+            return _osa(script).strip() == "reused"
+        except Exception:  # noqa: BLE001 — any scripting hiccup → honest `open` fallback
+            return False
 
     def web_search(self, query: str) -> str:
         subprocess.run(["open", f"https://www.google.com/search?q={quote_plus(query)}"],

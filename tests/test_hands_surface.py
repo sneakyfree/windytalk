@@ -118,10 +118,15 @@ def test_unknown_tool():
 def test_unsupported_maps_cleanly():
     class NoScreenshot(FakeBackend):
         def screenshot(self, path=None):
-            raise UnsupportedTool()
+            raise UnsupportedTool("screenshot: no working mechanism [grim(OSError)]")
     s = HandsSurface(backend=NoScreenshot(),
                      policy=TierPolicy(confirmer=lambda *a: True))
-    assert s.invoke("screenshot", {}) == {"ok": False, "error": "unsupported"}
+    r = s.invoke("screenshot", {})
+    assert r["ok"] is False
+    # stable prefix (tri-state contract) + run_chain's cause carried through —
+    # a bare masked "unsupported" cost a live session not knowing why (07-22)
+    assert r["error"].startswith("unsupported")
+    assert "grim(OSError)" in r["error"]
 
 
 # ---------- HTTP + MCP transports ----------
