@@ -22,6 +22,7 @@ barge-in able to cut speech that hasn't been played yet.
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import re
 import struct
@@ -254,8 +255,14 @@ class VoiceSession:
             if not tool_calls:
                 return " ".join(reply_parts)
             results = await self._run_tools(tool_calls)
-            messages = messages + [{"role": "assistant",
-                                    "tool_calls": [tc.__dict__ for tc in tool_calls]}] + results
+            # OpenAI wire shape, not ToolCall.__dict__ — the brain 4xxes on the
+            # follow-up call otherwise (arguments must be a JSON string).
+            messages = messages + [{"role": "assistant", "content": None,
+                                    "tool_calls": [
+                                        {"id": tc.id, "type": "function",
+                                         "function": {"name": tc.name,
+                                                      "arguments": json.dumps(tc.arguments)}}
+                                        for tc in tool_calls]}] + results
         return " ".join(reply_parts)
 
     async def _run_tools(self, tool_calls) -> list[dict]:

@@ -38,8 +38,10 @@ class FakeBrain:
     def __init__(self, rounds):
         self.rounds = list(rounds)
         self.calls = 0
+        self.seen_messages = []
 
     def stream(self, messages, tools=None, model=None):
+        self.seen_messages.append(messages)
         evs = self.rounds[min(self.calls, len(self.rounds) - 1)]
         self.calls += 1
         yield from evs
@@ -200,6 +202,16 @@ async def test_tool_round_emits_tool_call_and_continues():
         await s._turn_task
     say = [e for e in s._events if e["type"] == "say_start"]
     assert any("calculator is open" in e["text"].lower() for e in say)
+    # the follow-up brain call must carry OpenAI wire shape, not ToolCall.__dict__
+    # (Mind 422s otherwise — found live on the Mac mini, first real tool round)
+    followup = brain.seen_messages[1]
+    tc_msg = next(m for m in followup if m["role"] == "assistant" and m.get("tool_calls"))
+    call = tc_msg["tool_calls"][0]
+    assert call["type"] == "function" and call["id"] == "c1"
+    assert call["function"]["name"] == "open_app"
+    assert call["function"]["arguments"] == '{"name": "calc"}'
+    tool_msg = next(m for m in followup if m["role"] == "tool")
+    assert tool_msg["tool_call_id"] == "c1" and tool_msg["content"] == "Opening calc"
 
 
 @pytest.mark.asyncio
