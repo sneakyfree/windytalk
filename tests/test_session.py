@@ -369,3 +369,32 @@ async def test_sparse_false_voiced_frames_do_not_barge():
             await s.on_mic_frame(_silent())
     assert not any(e["type"] == "say_cancel" and e.get("reason") == "barge_in"
                    for e in s._events)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_reply_still_enters_history():
+    # Round-2 finding: a barged/superseded reply vanished from history, so the
+    # brain confabulated ("I'm a text-only assistant"). The spoken part must be
+    # recorded, marked interrupted.
+    import time as _time
+
+    class SlowSecondBrain:
+        def stream(self, messages, tools=None, model=None):
+            yield BrainEvent(kind="text", text="First part said. ")
+            _time.sleep(0.8)
+            yield BrainEvent(kind="text", text="Never reached aloud.")
+            yield BrainEvent(kind="done", finish_reason="stop")
+
+    s = make_session(SlowSecondBrain())
+    await s.start()
+    await s.on_mic(True)
+    await s.on_text("question one")
+    for _ in range(200):                       # wait until the first segment spoke
+        await asyncio.sleep(0.005)
+        if any(e["type"] == "say_end" for e in s._events):
+            break
+    await s._cancel_turn(reason="superseded")
+    entries = [m for m in s._history if m["role"] == "assistant"]
+    assert entries, "cancelled reply must still be recorded"
+    assert "First part said." in entries[-1]["content"]
+    assert "[interrupted by the user before finishing]" in entries[-1]["content"]

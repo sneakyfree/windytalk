@@ -82,3 +82,34 @@ def test_windows_keymap_has_f6_through_f10():
         assert windows._SK_KEYS[k] == "{" + k.upper() + "}"
     # super/win/meta are dropped, never mismapped to Ctrl
     assert "super" not in windows._SK_MODS and "super" in windows._SK_DROP
+
+
+def test_macos_open_url_reuses_existing_chrome_tab(monkeypatch):
+    # 07-22 live session: 4 identical Calendar tabs. Same-host tab in a running
+    # Chrome → focus + navigate it, no `open` spawn.
+    calls = []
+    monkeypatch.setattr(macos, "_osa", lambda script, timeout=12: "reused")
+    monkeypatch.setattr(macos.subprocess, "run",
+                        lambda *a, **k: calls.append(a) or None)
+    out = macos.MacOSBackend().open_url("https://calendar.google.com/x")
+    assert "reused" in out and not calls          # no `open` subprocess
+
+
+def test_macos_open_url_falls_back_to_open(monkeypatch):
+    # Chrome not running / no matching tab / scripting error → plain `open`.
+    calls = []
+
+    class R:
+        returncode = 0
+    monkeypatch.setattr(macos, "_osa", lambda script, timeout=12: "no")
+    monkeypatch.setattr(macos.subprocess, "run",
+                        lambda *a, **k: calls.append(a[0]) or R())
+    out = macos.MacOSBackend().open_url("example.com")
+    assert calls and calls[0][0] == "open" and calls[0][1] == "https://example.com"
+    assert out == "Opening https://example.com"
+
+    calls.clear()
+    def boom(script, timeout=12): raise RuntimeError("osascript died")
+    monkeypatch.setattr(macos, "_osa", boom)
+    macos.MacOSBackend().open_url("https://example.com")
+    assert calls and calls[0][0] == "open"

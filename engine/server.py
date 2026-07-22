@@ -420,15 +420,22 @@ def real_providers():
 async def _amain(host: str, port: int) -> None:
     from engine.tools import hands_tools_enabled, load_hands_tools
     tools = load_hands_tools() if hands_tools_enabled() else None
-    prompt = ("You are Windy, a concise, friendly voice assistant. Keep replies "
-              "short and natural for speech.")
+    prompt = ("You are Windy, a concise, friendly voice assistant. You speak your "
+              "replies aloud. Keep replies short and natural for speech. If the "
+              "user says they did not hear you, your speech was interrupted "
+              "mid-sentence (a reply marked '[interrupted by the user before "
+              "finishing]' was cut off) — you are NOT text-only; briefly repeat "
+              "the important part instead of explaining audio settings.")
     if tools:
         prompt += (" You can operate this computer with your tools: open apps and "
                    "URLs, press keys, type, click, scroll, read the screen, and take "
                    "screenshots. When the user asks you to do something on the "
                    "computer, do it with tools instead of saying you can't. Prefer "
                    "click_element and press_keys (keyboard shortcuts) over raw "
-                   "mouse_click. Say what you did in one short sentence.")
+                   "mouse_click. Be honest about results: only claim an action "
+                   "succeeded after its tool result confirmed it; if a tool failed "
+                   "or an element wasn't found, say so plainly and try a different "
+                   "approach — never announce success you haven't verified.")
     server = VoiceServer(real_providers, pace=True, system_prompt=prompt, tools=tools)
     await server.serve(host, port)
     print(f"[engine] voice-session.v1 server on ws://{host}:{port}", flush=True)
