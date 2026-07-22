@@ -98,6 +98,9 @@ class VoiceSession:
         # with WINDYTALK_NO_THINK_SUPERSEDE=1.
         self._think_seg = self._fresh_seg()
         self._think_supersede = os.environ.get("WINDYTALK_NO_THINK_SUPERSEDE") != "1"
+        self._supersede_stuck_ms = _env_ms("WINDYTALK_SUPERSEDE_STUCK_MS", 8000)
+        self._turn_started_at: float = 0.0
+        self._turn_produced = False             # has this turn emitted a tool_call or speech?
         self._history: list[dict] = []
         self._partial_reply: list[str] = []
         self._tool_futures: dict[str, asyncio.Future] = {}
@@ -216,9 +219,20 @@ class VoiceSession:
                 if self._barge_unvoiced_run * FRAME_MS >= _BARGE_DECAY_MS:
                     self._barge_voiced_ms = 0
         elif self.state == "thinking" and self._think_supersede:
-            # A full new utterance spoken while the brain/tools are still running
-            # supersedes the in-flight turn (nothing is playing yet, so no echo
-            # risk). Fixes "I moved on and you kept answering the old question."
+            # A new utterance during thinking supersedes the in-flight turn — BUT
+            # only a turn that is genuinely STUCK (no tool_call or speech emitted
+            # yet, and thinking for >_supersede_stuck_ms). On slow CPU a reply can
+            # take several seconds; killing every such turn the moment the user
+            # says "you there?" produced a silence spiral where 15/23 utterances
+            # got no answer at all (2026-07-22 round 3). A turn that is actively
+            # producing output is protected — the nudge is dropped and the turn
+            # completes, so the user actually hears the answer. Only a truly hung
+            # turn gets replaced. WINDYTALK_SUPERSEDE_STUCK_MS tunes the floor.
+            loop = self.loop or asyncio.get_running_loop()
+            stuck = (not self._turn_produced
+                     and (loop.time() - self._turn_started_at) * 1000 >= self._supersede_stuck_ms)
+            if not stuck:
+                return  # protect the working turn; drop the interjecting frames
             for utter in self._think_seg.push(pcm):
                 self._think_seg = self._fresh_seg()
                 await self._start_turn(utter_pcm=utter)
@@ -238,6 +252,8 @@ class VoiceSession:
         self._barge_unvoiced_run = 0
         self._barge_frames = []
         self._think_seg = self._fresh_seg()
+        self._turn_started_at = (self.loop or asyncio.get_running_loop()).time()
+        self._turn_produced = False
         # Enter "thinking" internally (so no second utterance races in) but DON'T
         # emit it yet — §6 requires heard{final} to precede state{thinking} on the
         # wire, and on the mic path the transcript isn't known until STT runs inside
@@ -325,6 +341,7 @@ class VoiceSession:
         for tc in tool_calls:
             fut = (self.loop or asyncio.get_running_loop()).create_future()
             self._tool_futures[tc.id] = fut
+            self._turn_produced = True   # doing real work → protect from supersede
             try:
                 await self.emit({"type": "tool_call", "call_id": tc.id,
                                  "turn_id": self.turn_id, "tool": tc.name,
@@ -384,6 +401,7 @@ class VoiceSession:
         loop = self.loop or asyncio.get_running_loop()
         self.say_id += 1
         self._active_say_id = self.say_id
+        self._turn_produced = True   # speaking = producing output → protect from supersede
         await self.emit({"type": "say_start", "say_id": self.say_id,
                          "turn_id": self.turn_id, "text": text})
         pcm = await loop.run_in_executor(None, self.tts.synthesize, text)

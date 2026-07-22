@@ -199,29 +199,28 @@ async def test_barge_grace_protects_start_of_speech():
 
 
 @pytest.mark.asyncio
-async def test_thinking_utterance_supersedes_turn():
-    # "You're two questions behind": a full utterance spoken while the brain is
-    # still working must abandon the in-flight turn and start a fresh one.
+async def test_stuck_turn_is_superseded():
+    # A genuinely HUNG turn (no output, thinking a long time) is replaced by a new
+    # utterance — the round-2 win, now scoped to stuck turns only.
     class SlowBrain:
-        def __init__(self): self.calls = 0
         def stream(self, messages, tools=None, model=None):
-            self.calls += 1
             yield BrainEvent(kind="text", text="old answer")
             yield BrainEvent(kind="done", finish_reason="stop")
 
     s = make_session(SlowBrain(), stt=FakeSTT(text="the new question"))
     await s.start()
     await s.on_mic(True)
-    s.state = "thinking"              # simulate an in-flight turn
+    s.state = "thinking"
     s.turn_id = 1
+    s._turn_produced = False
+    s._turn_started_at = asyncio.get_running_loop().time() - 999  # long-stuck
     prior = asyncio.ensure_future(asyncio.sleep(5))
     s._turn_task = prior
-    # speak a complete utterance while thinking
     for _ in range(10):
         await s.on_mic_frame(_voiced())
     for _ in range(36):
         await s.on_mic_frame(_silent())
-    assert prior.cancelled() or prior.done()   # old turn was superseded
+    assert prior.cancelled() or prior.done()   # stuck turn was superseded
     if s._turn_task:
         await s._turn_task
     heard = [e for e in s._events if e["type"] == "heard"]
@@ -398,3 +397,52 @@ async def test_cancelled_reply_still_enters_history():
     assert entries, "cancelled reply must still be recorded"
     assert "First part said." in entries[-1]["content"]
     assert "[interrupted by the user before finishing]" in entries[-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_working_turn_is_protected_from_supersede():
+    # Round-3 spiral fix: a turn that has PRODUCED output (a tool_call or speech)
+    # must NOT be killed by an anxious "you there?" nudge — the interjecting
+    # frames are dropped and the turn completes so the user hears the answer.
+    class WorkingBrain:
+        def stream(self, messages, tools=None, model=None):
+            yield BrainEvent(kind="text", text="the answer you were waiting for")
+            yield BrainEvent(kind="done", finish_reason="stop")
+
+    s = make_session(WorkingBrain(), stt=FakeSTT(text="are you there"))
+    await s.start()
+    await s.on_mic(True)
+    s.state = "thinking"
+    s.turn_id = 1
+    s._turn_produced = True                       # already producing output
+    s._turn_started_at = asyncio.get_running_loop().time()
+    prior = asyncio.ensure_future(asyncio.sleep(5))
+    s._turn_task = prior
+    for _ in range(10):
+        await s.on_mic_frame(_voiced())
+    for _ in range(36):
+        await s.on_mic_frame(_silent())
+    assert not prior.done()                       # protected — nudge dropped
+    prior.cancel()
+
+
+@pytest.mark.asyncio
+async def test_fast_producing_turn_survives_immediate_nudge():
+    # Even a NOT-yet-stuck turn (young, no output) is protected — supersede only
+    # fires past the stuck floor, so a quick nudge right after speaking can't
+    # kill a turn that's about to answer.
+    s = make_session(FakeBrain([[BrainEvent(kind="text", text="x")]]),
+                     stt=FakeSTT(text="hello"))
+    await s.start()
+    await s.on_mic(True)
+    s.state = "thinking"
+    s._turn_produced = False
+    s._turn_started_at = asyncio.get_running_loop().time()   # just started
+    prior = asyncio.ensure_future(asyncio.sleep(5))
+    s._turn_task = prior
+    for _ in range(10):
+        await s.on_mic_frame(_voiced())
+    for _ in range(36):
+        await s.on_mic_frame(_silent())
+    assert not prior.done()                       # young turn protected
+    prior.cancel()
