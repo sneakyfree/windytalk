@@ -83,6 +83,44 @@ class MindBrain(BrainProvider):
             for raw in resp:
                 yield raw.decode("utf-8", "replace").rstrip("\r\n")
 
+    def _post_json(self, body: dict) -> dict:
+        """POST a non-streaming request and return the parsed JSON reply.
+        Raises on transport/HTTP error (callers convert to an error event)."""
+        req = urllib.request.Request(
+            f"{self.base_url}/chat",
+            data=json.dumps(body).encode(),
+            headers={"Authorization": f"Bearer {self.api_key}",
+                     "Content-Type": "application/json",
+                     "User-Agent": USER_AGENT},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=self.timeout, context=_https_ctx()) as resp:
+            return json.loads(resp.read().decode("utf-8", "replace"))
+
+    def _nonstream_turn(self, body: dict) -> Iterator[BrainEvent]:
+        """One whole-reply turn: same events as stream(), delivered in one burst."""
+        try:
+            data = self._post_json(body)
+            message = ((data.get("choices") or [{}])[0]).get("message") or {}
+            finish = ((data.get("choices") or [{}])[0]).get("finish_reason")
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            yield BrainEvent(kind="error",
+                             message=f"Mind unreachable: {type(e).__name__}")
+            return
+        except Exception as e:  # never let the voice loop die on the brain
+            yield BrainEvent(kind="error", message=f"Mind error: {type(e).__name__}")
+            return
+        content = message.get("content")
+        if content:
+            yield BrainEvent(kind="text", text=content)
+        frags: dict[int, dict] = {}
+        for i, tc in enumerate(message.get("tool_calls") or []):
+            _accumulate_tool_call(frags, {**tc, "index": tc.get("index", i)})
+        calls = _assemble_tool_calls(frags)
+        if calls:
+            yield BrainEvent(kind="tool_calls", tool_calls=calls)
+        yield BrainEvent(kind="done", finish_reason=finish or "stop")
+
     # -- streaming turn --------------------------------------------------------
 
     def stream(self, messages: list[dict], tools: list[dict] | None = None,
@@ -91,6 +129,15 @@ class MindBrain(BrainProvider):
                       "stream": True}
         if tools:
             body["tools"] = tools
+            # Mind's streaming path drops delta.tool_calls end-to-end (adapters
+            # parse only delta.content; the SSE re-encoder forwards only content
+            # — windy-mind#75), so a tool-armed turn must go non-streaming or
+            # the model's calls never arrive. WINDYTALK_MIND_STREAM_TOOLS=1
+            # re-enables streaming once Mind ships the fix.
+            if os.environ.get("WINDYTALK_MIND_STREAM_TOOLS") != "1":
+                body["stream"] = False
+                yield from self._nonstream_turn(body)
+                return
 
         # tool-call fragments accumulate by index across chunks (OpenAI streaming shape)
         tool_frags: dict[int, dict] = {}

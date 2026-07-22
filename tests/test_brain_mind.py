@@ -74,3 +74,67 @@ def test_malformed_chunks_are_skipped(monkeypatch):
     events = list(MindBrain(api_key="k").stream([{"role": "user", "content": "hi"}]))
     assert "".join(e.text for e in events if e.kind == "text") == "ok"
     assert any(e.kind == "done" for e in events)
+
+
+# -- tools → non-streaming turn (windy-mind#75 workaround) ---------------------
+
+def fake_json(reply, capture=None):
+    def _post_json(self, body):
+        if capture is not None:
+            capture.append(body)
+        return reply
+    return _post_json
+
+
+def test_tools_turn_goes_nonstream_and_emits_tool_calls(monkeypatch):
+    monkeypatch.delenv("WINDYTALK_MIND_STREAM_TOOLS", raising=False)
+    sent = []
+    reply = {"choices": [{"message": {
+        "role": "assistant", "content": "",
+        "tool_calls": [{"id": "call_1", "type": "function",
+                        "function": {"name": "press_keys",
+                                     "arguments": '{"keys": "cmd+t"}'}}]},
+        "finish_reason": "tool_use"}]}
+    monkeypatch.setattr(MindBrain, "_post_json", fake_json(reply, sent))
+    tools = [{"type": "function", "function": {"name": "press_keys"}}]
+    events = list(MindBrain(api_key="k").stream(
+        [{"role": "user", "content": "new tab"}], tools=tools))
+    assert sent[0]["stream"] is False and sent[0]["tools"] == tools
+    calls = [e for e in events if e.kind == "tool_calls"][0].tool_calls
+    assert calls == [ToolCall(id="call_1", name="press_keys",
+                              arguments={"keys": "cmd+t"})]
+    assert events[-1].kind == "done" and events[-1].finish_reason == "tool_use"
+
+
+def test_tools_turn_text_reply_still_speaks(monkeypatch):
+    monkeypatch.delenv("WINDYTALK_MIND_STREAM_TOOLS", raising=False)
+    reply = {"choices": [{"message": {"role": "assistant", "content": "Done."},
+                          "finish_reason": "stop"}]}
+    monkeypatch.setattr(MindBrain, "_post_json", fake_json(reply))
+    events = list(MindBrain(api_key="k").stream(
+        [{"role": "user", "content": "hi"}],
+        tools=[{"type": "function", "function": {"name": "t"}}]))
+    assert [e.text for e in events if e.kind == "text"] == ["Done."]
+    assert events[-1].kind == "done"
+
+
+def test_tools_turn_unreachable_yields_error_not_raise(monkeypatch):
+    monkeypatch.delenv("WINDYTALK_MIND_STREAM_TOOLS", raising=False)
+
+    def boom(self, body):
+        raise urllib.error.URLError("down")
+    monkeypatch.setattr(MindBrain, "_post_json", boom)
+    events = list(MindBrain(api_key="k").stream(
+        [{"role": "user", "content": "hi"}],
+        tools=[{"type": "function", "function": {"name": "t"}}]))
+    assert events[0].kind == "error" and "unreachable" in events[0].message
+
+
+def test_stream_tools_escape_hatch_keeps_streaming(monkeypatch):
+    monkeypatch.setenv("WINDYTALK_MIND_STREAM_TOOLS", "1")
+    lines = sse('{"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}')
+    monkeypatch.setattr(MindBrain, "_post_sse", fake_stream(lines))
+    events = list(MindBrain(api_key="k").stream(
+        [{"role": "user", "content": "hi"}],
+        tools=[{"type": "function", "function": {"name": "t"}}]))
+    assert [e.text for e in events if e.kind == "text"] == ["hi"]
