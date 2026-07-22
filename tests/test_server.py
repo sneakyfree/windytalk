@@ -163,3 +163,35 @@ async def test_telemetry_events_are_emitted_and_content_free(endpoint, monkeypat
         assert not (banned & set(fields)), fields
     end = next(f for k, f in events if k == "session.end")
     assert end["turns"] >= 1 and "dur_ms" in end
+
+
+async def test_client_platform_lands_in_system_prompt():
+    # A mac client must get cmd-not-ctrl guidance; the engine may be remote, so
+    # the CLIENT's hello platform (not the engine host) decides.
+    seen = []
+
+    class CapturingBrain(FakeBrain):
+        def stream(self, messages, tools=None, model=None):
+            seen.append(messages)
+            yield from super().stream(messages, tools=tools, model=model)
+
+    def _providers(): return FakeSTT(), FakeTTS(), CapturingBrain()
+    srv = VoiceServer(_providers, pace=False, system_prompt="You are Windy.",
+                      tools=[{"type": "function", "function": {"name": "press_keys"}}])
+    ws_server = await srv.serve("127.0.0.1", 0)
+    port = ws_server.sockets[0].getsockname()[1]
+    try:
+        async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+            await ws.send(json.dumps({"type": "hello", "protocol": "voice-session.v1",
+                                      "client": {"app": "t", "version": "1",
+                                                 "platform": "darwin"}}))
+            assert json.loads(await ws.recv())["type"] == "ready"
+            await ws.send(json.dumps({"type": "mic", "on": True, "ts": 0}))
+            await ws.send(json.dumps({"type": "text", "message": "new tab"}))
+            await _collect(ws, stop=_turn_ended)
+    finally:
+        ws_server.close()
+        await ws_server.wait_closed()
+    system = seen[0][0]
+    assert system["role"] == "system"
+    assert "macOS" in system["content"] and "cmd" in system["content"]

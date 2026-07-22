@@ -228,8 +228,18 @@ class VoiceServer:
         min_speech = _clamp_int(vad.get("min_speech_ms"), 150, 50, 1000)
         silence = _clamp_int(vad.get("silence_ms"), 700, 200, 2000)
         level_events = opts.get("level_events", True) is not False
+        # The brain must know the CLIENT's OS (this engine may be remote): a mac
+        # user asked for a new tab gets cmd+t, not ctrl+t.
+        client_platform = str((hello.get("client") or {}).get("platform") or "")
+        prompt = self.system_prompt
+        if prompt and self.tools and client_platform:
+            os_name = {"darwin": "macOS", "win32": "Windows", "linux": "Linux"}.get(
+                client_platform, client_platform)
+            prompt += (f" The user's computer runs {os_name}."
+                       + (" Use cmd (not ctrl) keyboard shortcuts."
+                          if os_name == "macOS" else ""))
         session = VoiceSession(stt, tts, brain, conn.emit, session_id=session_id,
-                               system_prompt=self.system_prompt, tools=self.tools,
+                               system_prompt=prompt, tools=self.tools,
                                min_speech_ms=min_speech, silence_ms=silence,
                                level_events=level_events, pace=self.pace, loop=loop)
         conn.session = session
