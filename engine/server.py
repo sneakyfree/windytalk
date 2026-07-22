@@ -384,9 +384,18 @@ def real_providers():
 
 
 async def _amain(host: str, port: int) -> None:
-    server = VoiceServer(real_providers, pace=True,
-                         system_prompt="You are Windy, a concise, friendly voice "
-                         "assistant. Keep replies short and natural for speech.")
+    from engine.tools import hands_tools_enabled, load_hands_tools
+    tools = load_hands_tools() if hands_tools_enabled() else None
+    prompt = ("You are Windy, a concise, friendly voice assistant. Keep replies "
+              "short and natural for speech.")
+    if tools:
+        prompt += (" You can operate this computer with your tools: open apps and "
+                   "URLs, press keys, type, click, scroll, read the screen, and take "
+                   "screenshots. When the user asks you to do something on the "
+                   "computer, do it with tools instead of saying you can't. Prefer "
+                   "click_element and press_keys (keyboard shortcuts) over raw "
+                   "mouse_click. Say what you did in one short sentence.")
+    server = VoiceServer(real_providers, pace=True, system_prompt=prompt, tools=tools)
     await server.serve(host, port)
     print(f"[engine] voice-session.v1 server on ws://{host}:{port}", flush=True)
     await asyncio.Future()
