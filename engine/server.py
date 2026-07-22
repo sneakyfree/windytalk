@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import struct
 import time
 
@@ -108,6 +109,26 @@ def parse_frame(buf: bytes):
     return ftype, flags, seq, ts_ms, stream_id, buf[16:]
 
 
+_TLOG_SKIP = {"audio", "level", "time_ping"}
+
+
+def _tlog(session_id: str, direction: str, e: dict) -> None:
+    """Dev-only session debug log: WINDYTALK_DEBUG_TRANSCRIPT=<path> appends
+    one JSON line per conversational event. A LOCAL file for a developer
+    watching a live session — deliberately not telemetry (telemetry.v1 is
+    content-free by construction and must stay that way)."""
+    path = os.environ.get("WINDYTALK_DEBUG_TRANSCRIPT")
+    if not path or e.get("type") in _TLOG_SKIP:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"t": now_ms(), "sid": session_id, "dir": direction,
+                                **{k: v for k, v in e.items() if k != "pcm"}},
+                               ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
 class _Conn:
     """Per-connection wire state: a session + the outbound serializer."""
 
@@ -146,6 +167,7 @@ class _Conn:
         if etype == "heard" and e.get("final"):
             self._t_eos = time.perf_counter()
             self._first_audio_seen = False
+        _tlog(self.session_id, "out", e)
         self._telemetry(e)
         e.setdefault("ts", now_ms())  # §5: JSON events carry a session-clock ts
         await self.ws.send(json.dumps(e))
@@ -301,6 +323,8 @@ class VoiceServer:
         if not isinstance(m, dict):
             return  # §5: non-object JSON is ignored, not fatal
         t = m.get("type")
+        if t in ("mic", "barge_in", "tool_result", "text"):
+            _tlog(conn.session_id, "in", m)
         if t == "mic":
             await session.on_mic(bool(m.get("on")))
         elif t == "barge_in":

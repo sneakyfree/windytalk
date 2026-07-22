@@ -195,3 +195,35 @@ async def test_client_platform_lands_in_system_prompt():
     system = seen[0][0]
     assert system["role"] == "system"
     assert "macOS" in system["content"] and "cmd" in system["content"]
+
+
+async def test_debug_transcript_logs_turn(tmp_path, monkeypatch):
+    # WINDYTALK_DEBUG_TRANSCRIPT=<path> → local JSONL of conversational events
+    # (heard/say/tool/mic), never audio frames. Off by default.
+    log = tmp_path / "transcript.jsonl"
+    monkeypatch.setenv("WINDYTALK_DEBUG_TRANSCRIPT", str(log))
+    srv = VoiceServer(providers, pace=False)
+    ws_server = await srv.serve("127.0.0.1", 0)
+    port = ws_server.sockets[0].getsockname()[1]
+    try:
+        async with websockets.connect(f"ws://127.0.0.1:{port}") as ws:
+            await ws.send(json.dumps({"type": "hello", "protocol": "voice-session.v1",
+                                      "client": {"app": "t", "version": "1",
+                                                 "platform": "linux"}}))
+            assert json.loads(await ws.recv())["type"] == "ready"
+            await ws.send(json.dumps({"type": "mic", "on": True, "ts": 0}))
+            seq = 0
+            for pcm in [_voiced()] * 10 + [_silent()] * 36:
+                await ws.send(build_frame(MIC_TYPE, 0, seq, 0, 0, pcm))
+                seq = (seq + 1) & 0xFFFF
+            await _collect(ws, stop=_turn_ended)
+    finally:
+        ws_server.close()
+        await ws_server.wait_closed()
+    lines = [json.loads(ln) for ln in log.read_text().splitlines()]
+    types = [(ln["dir"], ln["type"]) for ln in lines]
+    assert ("in", "mic") in types and ("out", "heard") in types
+    assert ("out", "say_start") in types
+    assert all(ln["type"] not in ("audio", "level", "time_ping") for ln in lines)
+    heard = next(ln for ln in lines if ln["type"] == "heard" and ln.get("final"))
+    assert heard["text"] == "open the calculator"
