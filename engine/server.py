@@ -421,11 +421,14 @@ async def _amain(host: str, port: int) -> None:
     from engine.tools import hands_tools_enabled, load_hands_tools
     tools = load_hands_tools() if hands_tools_enabled() else None
     prompt = ("You are Windy, a concise, friendly voice assistant. You speak your "
-              "replies aloud. Keep replies short and natural for speech. If the "
-              "user says they did not hear you, your speech was interrupted "
-              "mid-sentence (a reply marked '[interrupted by the user before "
-              "finishing]' was cut off) — you are NOT text-only; briefly repeat "
-              "the important part instead of explaining audio settings.")
+              "replies aloud. Answer in ONE short sentence — the fewest words that "
+              "do the job. Do NOT add trailing offers or filler like 'Let me know "
+              "if you need anything else' or 'Let me try another approach'; those "
+              "just get talked over. State the result and stop. If the user says "
+              "they did not hear you, your speech was interrupted mid-sentence (a "
+              "reply marked '[interrupted by the user before finishing]' was cut "
+              "off) — you are NOT text-only; briefly repeat the key part instead "
+              "of explaining audio settings.")
     if tools:
         prompt += (" You can operate this computer with your tools: open apps and "
                    "URLs, press keys, type, click, scroll, read the screen, and take "
