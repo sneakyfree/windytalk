@@ -139,6 +139,10 @@ def test_linux_type_text_pivots_when_primary_tool_dead(monkeypatch):
     monkeypatch.delenv("WINDYTALK_INPUT", raising=False)
     present = {"xdotool", "ydotool"}  # wtype not installed
     monkeypatch.setattr(lx, "_which", lambda t: t if t in present else None)
+    # ydotool is genuinely USABLE here (daemon up) — availability is more than
+    # binary presence since the OC2 findings (_ydotool_available probes the
+    # socket/uinput, absent on CI boxes).
+    monkeypatch.setattr(lx, "_ydotool_available", lambda: True)
     ran = []
     monkeypatch.setattr(lx, "_xdotool", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no X")))
     monkeypatch.setattr(lx, "_ydotool", lambda *a, **k: ran.append(("ydotool", a)))
@@ -159,6 +163,7 @@ def test_linux_mouse_click_falls_back_xdotool_to_ydotool(monkeypatch):
     monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
     monkeypatch.delenv("WINDYTALK_INPUT", raising=False)
     monkeypatch.setattr(lx, "_which", lambda t: t if t in ("xdotool", "ydotool") else None)
+    monkeypatch.setattr(lx, "_ydotool_available", lambda: True)  # daemon up on this box
     monkeypatch.setattr(lx, "_xdotool", lambda *a, **k: (_ for _ in ()).throw(OSError("dead")))
     ran = []
     monkeypatch.setattr(lx, "_ydotool", lambda *a, **k: ran.append(a))

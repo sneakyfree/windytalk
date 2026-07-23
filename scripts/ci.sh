@@ -30,6 +30,10 @@ echo "== pytest (unit tests; lazy CUDA imports, no GPU needed) =="
 python3 -m pytest tests/ -q
 
 echo "== tsc --noEmit (typecheck TS clients) =="
+# apps/desktop needs @types/node installed for its typecheck (types:["node"]).
+if [ ! -d apps/desktop/node_modules ]; then
+  ( cd apps/desktop && npm install --no-audit --no-fund )
+fi
 npx --yes -p typescript tsc --noEmit -p apps/desktop
 npx --yes -p typescript tsc --noEmit -p apps/cli
 

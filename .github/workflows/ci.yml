@@ -37,6 +37,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+      - name: Install desktop client deps (tsc needs @types/node)
+        # apps/desktop/tsconfig.json sets types:["node"] — @types/node must be
+        # installed BEFORE the typecheck, not only for the protocol tests below.
+        run: |
+          cd apps/desktop
+          npm install --no-audit --no-fund
       - name: Typecheck TS clients
         run: |
           npx --yes -p typescript tsc --noEmit -p apps/desktop
