@@ -12,9 +12,11 @@ on:
 
 jobs:
   python:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v4
+      - name: runner-lint (hosted runners are billing-locked)
+        run: bash "$GITHUB_WORKSPACE/.github/lint/lint-runner-labels.sh" "$GITHUB_WORKSPACE/.github/workflows"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -29,12 +31,18 @@ jobs:
         run: python -m pytest tests/ -q
 
   typecheck:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+      - name: Install desktop client deps (tsc needs @types/node)
+        # apps/desktop/tsconfig.json sets types:["node"] — @types/node must be
+        # installed BEFORE the typecheck, not only for the protocol tests below.
+        run: |
+          cd apps/desktop
+          npm install --no-audit --no-fund
       - name: Typecheck TS clients
         run: |
           npx --yes -p typescript tsc --noEmit -p apps/desktop
