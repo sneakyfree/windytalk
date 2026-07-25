@@ -524,3 +524,48 @@ async def test_tool_round_exhaustion_never_ends_in_silence():
     assert brain.calls >= 6, "expected the tool-round limit to be reached"
     assert any(e["type"] == "say_start" for e in s._events), \
         "six tool rounds and not one word spoken — the user is left in silence"
+
+
+def _pcm(level: int):
+    """A frame at a chosen amplitude (FakeSTT calls any non-zero frame voiced, so
+    this isolates LEVEL from voicedness)."""
+    return bytes([level, level]) * (FRAME_BYTES // 2)
+
+
+@pytest.mark.asyncio
+async def test_echo_floor_suppresses_self_barge_but_not_real_speech():
+    """AEC-lite: our own speaker bleed must not count as the user interrupting,
+    but a genuinely louder voice still must.
+
+    Measured live against the running engine: with only 5% speaker->mic bleed,
+    webrtcvad called every echo frame voiced and EVERY reply was cut at ~840ms
+    (grace 600 + confirm 240) — the user heard 0.82s of a 5.87s answer. Voicedness
+    alone cannot mean "the user is talking" on a machine with open speakers.
+    So the grace window doubles as calibration: whatever the mic hears while only
+    WE are speaking is the echo floor, and barge evidence must exceed it.
+    """
+    s = make_session(FakeBrain([[BrainEvent(kind="text", text="reply")]]))
+    await s.start()
+    s.mic_on = True
+    s.state = "speaking"
+    s._speaking_since = asyncio.get_running_loop().time()   # grace open
+    s._active_say_id = 2
+    s._turn_task = asyncio.ensure_future(asyncio.sleep(10))
+
+    echo = _pcm(0x10)
+    for _ in range(int(s._barge_grace_ms / 20)):    # calibrate on our own bleed
+        await s.on_mic_frame(echo)
+    assert s._echo_floor > 0, "grace window did not calibrate an echo floor"
+
+    s._speaking_since = 0.0                          # grace now expired
+    for _ in range(s._barge_confirm_ms // 20 + 10):  # sustained echo, same level
+        await s.on_mic_frame(echo)
+    assert not any(e["type"] == "say_cancel" for e in s._events), \
+        "sustained echo at the calibrated floor self-barged — the truncation bug"
+
+    for _ in range(s._barge_confirm_ms // 20 + 1):   # a real, louder interruption
+        await s.on_mic_frame(_pcm(0x60))
+    assert any(e["type"] == "say_cancel" and e.get("reason") == "barge_in"
+               for e in s._events), "a genuine interrupt was swallowed by the echo gate"
+    if s._turn_task:            # the confirmed barge already cancelled it
+        s._turn_task.cancel()

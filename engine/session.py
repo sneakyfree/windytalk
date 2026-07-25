@@ -95,6 +95,13 @@ class VoiceSession:
         self._barge_frames: list[bytes] = []   # frames captured during a barge (carried to new turn)
         self._barge_verdict: asyncio.Task | None = None
         self._barge_grace_ms = _env_ms("WINDYTALK_BARGE_GRACE_MS", _BARGE_GRACE_MS)
+        # AEC-lite: mean mic level measured during the grace window of the CURRENT
+        # segment. While we speak and the user does not, whatever the mic hears is
+        # our own echo — so this self-calibrates to any speaker/mic/volume setup
+        # without the client needing real AEC. Reset per segment.
+        self._echo_floor = 0.0
+        self._echo_n = 0
+        self._echo_margin = float(os.environ.get("WINDYTALK_ECHO_MARGIN", "2.5") or 2.5)
         self._barge_confirm_ms = _env_ms("WINDYTALK_BARGE_CONFIRM_MS", _BARGE_CONFIRM_MS_DEFAULT)
         self._speaking_since: float = 0.0       # monotonic start of the current speaking phase
         # A second segmenter that runs while THINKING so a new utterance spoken
@@ -196,6 +203,7 @@ class VoiceSession:
             # engine-detected barge-in (§7.5): sustained voiced cuts speech.
             fb = _MIC_FRAME_BYTES
             voiced = len(pcm) >= fb and self._seg._is_speech(pcm[:fb], 16000)
+            level = _rms(pcm[:fb]) if len(pcm) >= fb else 0.0
             self._barge_frames.append(pcm)          # keep for carrying into the new turn
             if len(self._barge_frames) > 40:
                 self._barge_frames.pop(0)
@@ -209,8 +217,19 @@ class VoiceSession:
             loop = self.loop or asyncio.get_running_loop()
             in_grace = (loop.time() - self._speaking_since) * 1000 < self._barge_grace_ms
             if in_grace and not client_signaled:
+                # Calibrate the echo floor: during the grace window WE are the only
+                # sound source, so the mic level here IS our own bleed-through.
+                self._echo_n += 1
+                self._echo_floor += (level - self._echo_floor) / self._echo_n
                 return
-            if voiced:
+            # webrtcvad calls our OWN speech "voiced" — measured live, even 5%
+            # speaker bleed produced a 100% false-barge rate and cut every reply at
+            # ~840 ms (grace + confirm). Voicedness alone therefore cannot mean
+            # "the user is talking"; it must also be meaningfully LOUDER than the
+            # echo we just calibrated. A client-signaled barge still bypasses this,
+            # because that is the user's own onset detector declaring intent.
+            above_echo = level > self._echo_floor * self._echo_margin
+            if voiced and (client_signaled or above_echo):
                 self._barge_voiced_ms += FRAME_MS
                 self._barge_unvoiced_run = 0
                 threshold = _BARGE_CONFIRM_MS if client_signaled else self._barge_confirm_ms
@@ -429,6 +448,8 @@ class VoiceSession:
         self._barge_voiced_ms = 0
         self._barge_unvoiced_run = 0
         self._speaking_since = loop.time()
+        self._echo_floor = 0.0
+        self._echo_n = 0
         n = 0
         for i in range(0, len(pcm), _AUDIO_FRAME_BYTES):
             chunk = pcm[i:i + _AUDIO_FRAME_BYTES]
