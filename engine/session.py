@@ -60,6 +60,11 @@ def _env_ms(name: str, default: int) -> int:
 _MIC_FRAME_BYTES = 16000 * FRAME_MS // 1000 * 2  # 640
 _LEVEL_EVERY = 2                 # emit `level` every N audio chunks (~25 Hz)
 _FALLBACK_LINE = "Sorry, I'm having trouble reaching my brain right now."
+# Distinct from the line above ON PURPOSE: the brain was reachable and answered, we
+# just never produced anything sayable (tool-round limit hit, or an empty reply).
+# Saying "trouble reaching my brain" there would be a lie, and silence is worse —
+# the user cannot tell a mute turn from a crashed app.
+_NO_REPLY_LINE = "Sorry, I didn't get that one finished. Could you say it again?"
 
 
 class VoiceSession:
@@ -279,6 +284,14 @@ class VoiceSession:
             reply = await self._stream_and_speak()
             if reply:
                 self._history.append({"role": "assistant", "content": reply})
+            else:
+                # A turn that produces nothing sayable must still SAY so. Otherwise
+                # the engine slides back to listening in silence and the user cannot
+                # distinguish "thinking", "gave up", and "crashed" — and since the
+                # next turn does answer, the conversation slips a question out of
+                # phase. Goes into history too, so the brain knows it went quiet.
+                await self._speak_fallback(_NO_REPLY_LINE)
+                self._history.append({"role": "assistant", "content": _NO_REPLY_LINE})
         except asyncio.CancelledError:
             # A cancelled (barged/superseded) reply must still enter history —
             # otherwise the brain has no memory it ever answered and confabulates
@@ -407,9 +420,15 @@ class VoiceSession:
         pcm = await loop.run_in_executor(None, self.tts.synthesize, text)
         if self.state == "thinking":
             await self._set_state("speaking")
-            self._barge_voiced_ms = 0
-            self._barge_unvoiced_run = 0
-            self._speaking_since = (self.loop or asyncio.get_running_loop()).time()
+        # EVERY segment is its own speaking phase (§7.3), not just the first. This
+        # reset used to live inside the `thinking` branch above, which is true only
+        # for sentence 1 of a reply — so sentences 2+ ran with a long-expired grace
+        # window AND the voiced tally that echo accumulated while sentence 1 played,
+        # and self-barged almost immediately. Live evidence (07-22): 8 of 11 cancelled
+        # segments were reason=barge_in, nearly all the last sentence of a reply.
+        self._barge_voiced_ms = 0
+        self._barge_unvoiced_run = 0
+        self._speaking_since = loop.time()
         n = 0
         for i in range(0, len(pcm), _AUDIO_FRAME_BYTES):
             chunk = pcm[i:i + _AUDIO_FRAME_BYTES]
@@ -424,16 +443,16 @@ class VoiceSession:
         await self.emit({"type": "say_end", "say_id": self.say_id})
         return text
 
-    async def _speak_fallback(self) -> None:
+    async def _speak_fallback(self, line: str = _FALLBACK_LINE) -> None:
         loop = self.loop or asyncio.get_running_loop()
         try:
             self.say_id += 1
             self._active_say_id = self.say_id
             await self.emit({"type": "say_start", "say_id": self.say_id,
-                             "turn_id": self.turn_id, "text": _FALLBACK_LINE})
+                             "turn_id": self.turn_id, "text": line})
             if self.state == "thinking":
                 await self._set_state("speaking")
-            pcm = await loop.run_in_executor(None, self.tts.synthesize, _FALLBACK_LINE)
+            pcm = await loop.run_in_executor(None, self.tts.synthesize, line)
             await self.emit({"type": "audio", "say_id": self.say_id, "pcm": pcm,
                              "final": True})
             await self.emit({"type": "say_end", "say_id": self.say_id})
