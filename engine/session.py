@@ -41,15 +41,30 @@ _AUDIO_FRAME_BYTES = TTS_RATE * _AUDIO_FRAME_MS // 1000 * 2  # 960
 _BARGE_CONFIRM_MS = 60           # §7.3 voiced to confirm a barge (within the window)
 _BARGE_VERDICT_MS = 250          # §7.3 engine must reply within 250 ms
 _BARGE_DECAY_MS = 100            # a silence gap this long resets the voiced tally
-# Real-room calibration (2026-07-22 first-voice-session findings): the contract's
-# 60 ms confirm assumes AEC-clean mic frames; with speaker→mic echo it self-
-# cancelled 49/58 replies. So (a) a start-of-speech grace where NO barge can fire,
-# and (b) a higher sustained-voiced confirm — both env-tunable to calibrate against
-# the live acoustic loop without a redeploy. Defaults are conservative (favor
-# letting Windy finish) since a missed barge just means one late interrupt, but a
-# false barge eats the whole answer.
-_BARGE_GRACE_MS = 600            # each speaking phase is un-interruptible this long
-_BARGE_CONFIRM_MS_DEFAULT = 240  # sustained voiced needed once past the grace window
+# Why the contract's 60 ms confirm appeared to fail, and why it now works again.
+#
+# §4.1 requires the CLIENT to send AEC-cleaned mic audio, and §7 rule 3 says confirm
+# on ≥60 ms of voiced. But AEC attenuates echo — it does not remove it, and the
+# residual is still SPEECH-SHAPED. webrtcvad is a speech/non-speech classifier with
+# no loudness opinion, so it calls that residual "voiced" for as long as Windy talks.
+# 60 ms of "voiced" therefore arrives instantly and every reply self-cancelled
+# (49/58 in the first live session; 8 of 11 cancels in the 07-22 hand test).
+#
+# The 2026-07-22 response was to wait longer and hope: a 600 ms un-interruptible
+# grace plus a 240 ms confirm (4x the contract). That traded one bug for two — it
+# put the engine out of spec, and it still only bought 840 ms, less than any real
+# reply, so replies kept getting cut at 0.82 s.
+#
+# The actual missing piece was a LOUDNESS opinion. Voicedness cannot separate "AEC
+# residual" from "the user is talking" — level can. So the engine now calibrates the
+# echo floor from its own bleed-through (see _echo_floor) and requires barge evidence
+# to exceed it. With that discriminator in place the two timing patches are no longer
+# load-bearing and are removed: confirm returns to the contract's 60 ms, and the grace
+# window shrinks to the span actually needed to measure the floor. Verified against a
+# live speaker->mic loopback at 0/5/20/35/60% bleed: no self-barge at any level, and a
+# real interruption still cuts her off at every level.
+_BARGE_GRACE_MS = 300            # start-of-segment window: measures the echo floor,
+                                 # and is un-interruptible while it does so
 
 
 def _env_ms(name: str, default: int) -> int:
@@ -60,6 +75,11 @@ def _env_ms(name: str, default: int) -> int:
 _MIC_FRAME_BYTES = 16000 * FRAME_MS // 1000 * 2  # 640
 _LEVEL_EVERY = 2                 # emit `level` every N audio chunks (~25 Hz)
 _FALLBACK_LINE = "Sorry, I'm having trouble reaching my brain right now."
+# Distinct from the line above ON PURPOSE: the brain was reachable and answered, we
+# just never produced anything sayable (tool-round limit hit, or an empty reply).
+# Saying "trouble reaching my brain" there would be a lie, and silence is worse —
+# the user cannot tell a mute turn from a crashed app.
+_NO_REPLY_LINE = "Sorry, I didn't get that one finished. Could you say it again?"
 
 
 class VoiceSession:
@@ -90,7 +110,21 @@ class VoiceSession:
         self._barge_frames: list[bytes] = []   # frames captured during a barge (carried to new turn)
         self._barge_verdict: asyncio.Task | None = None
         self._barge_grace_ms = _env_ms("WINDYTALK_BARGE_GRACE_MS", _BARGE_GRACE_MS)
-        self._barge_confirm_ms = _env_ms("WINDYTALK_BARGE_CONFIRM_MS", _BARGE_CONFIRM_MS_DEFAULT)
+        # AEC-lite: mean mic level measured during the grace window of the CURRENT
+        # segment. While we speak and the user does not, whatever the mic hears is
+        # our own echo — so this self-calibrates to any speaker/mic/volume setup
+        # without the client needing real AEC. Reset per segment.
+        self._echo_floor = 0.0
+        self._echo_n = 0
+        # 2.0 chosen by sweep, not taste: at 2.5 a genuine interruption was swallowed
+        # once speaker bleed hit 60% (the floor rose above the user's own voice); at
+        # 1.7 the headroom against self-barge gets thin. 2.0 passed the whole matrix —
+        # no self-barge at 5/20/35/60% bleed, real interrupt still cuts through at
+        # 35% and 60%.
+        self._echo_margin = float(os.environ.get("WINDYTALK_ECHO_MARGIN", "2.0") or 2.0)
+        # Back to the contract's §7 rule 3 value. The 240 ms patch it replaces was
+        # compensating for the missing loudness discriminator, not for real acoustics.
+        self._barge_confirm_ms = _env_ms("WINDYTALK_BARGE_CONFIRM_MS", _BARGE_CONFIRM_MS)
         self._speaking_since: float = 0.0       # monotonic start of the current speaking phase
         # A second segmenter that runs while THINKING so a new utterance spoken
         # mid-processing (before Windy speaks) supersedes the in-flight turn
@@ -191,6 +225,7 @@ class VoiceSession:
             # engine-detected barge-in (§7.5): sustained voiced cuts speech.
             fb = _MIC_FRAME_BYTES
             voiced = len(pcm) >= fb and self._seg._is_speech(pcm[:fb], 16000)
+            level = _rms(pcm[:fb]) if len(pcm) >= fb else 0.0
             self._barge_frames.append(pcm)          # keep for carrying into the new turn
             if len(self._barge_frames) > 40:
                 self._barge_frames.pop(0)
@@ -204,12 +239,24 @@ class VoiceSession:
             loop = self.loop or asyncio.get_running_loop()
             in_grace = (loop.time() - self._speaking_since) * 1000 < self._barge_grace_ms
             if in_grace and not client_signaled:
+                # Calibrate the echo floor: during the grace window WE are the only
+                # sound source, so the mic level here IS our own bleed-through.
+                self._echo_n += 1
+                self._echo_floor += (level - self._echo_floor) / self._echo_n
                 return
-            if voiced:
+            # webrtcvad calls our OWN speech "voiced" — measured live, even 5%
+            # speaker bleed produced a 100% false-barge rate and cut every reply at
+            # ~840 ms (grace + confirm). Voicedness alone therefore cannot mean
+            # "the user is talking"; it must also be meaningfully LOUDER than the
+            # echo we just calibrated. A client-signaled barge still bypasses this,
+            # because that is the user's own onset detector declaring intent.
+            above_echo = level > self._echo_floor * self._echo_margin
+            if voiced and (client_signaled or above_echo):
                 self._barge_voiced_ms += FRAME_MS
                 self._barge_unvoiced_run = 0
-                threshold = _BARGE_CONFIRM_MS if client_signaled else self._barge_confirm_ms
-                if self._barge_voiced_ms >= threshold:
+                # One threshold for both paths again (§7 rule 3). They diverged only
+                # while the autonomous path needed a longer fuse to survive echo.
+                if self._barge_voiced_ms >= self._barge_confirm_ms:
                     await self._confirm_barge()
             else:
                 # Decay: a silence gap resets the tally so sparse false-voiced frames
@@ -279,6 +326,14 @@ class VoiceSession:
             reply = await self._stream_and_speak()
             if reply:
                 self._history.append({"role": "assistant", "content": reply})
+            else:
+                # A turn that produces nothing sayable must still SAY so. Otherwise
+                # the engine slides back to listening in silence and the user cannot
+                # distinguish "thinking", "gave up", and "crashed" — and since the
+                # next turn does answer, the conversation slips a question out of
+                # phase. Goes into history too, so the brain knows it went quiet.
+                await self._speak_fallback(_NO_REPLY_LINE)
+                self._history.append({"role": "assistant", "content": _NO_REPLY_LINE})
         except asyncio.CancelledError:
             # A cancelled (barged/superseded) reply must still enter history —
             # otherwise the brain has no memory it ever answered and confabulates
@@ -407,9 +462,17 @@ class VoiceSession:
         pcm = await loop.run_in_executor(None, self.tts.synthesize, text)
         if self.state == "thinking":
             await self._set_state("speaking")
-            self._barge_voiced_ms = 0
-            self._barge_unvoiced_run = 0
-            self._speaking_since = (self.loop or asyncio.get_running_loop()).time()
+        # EVERY segment is its own speaking phase (§7.3), not just the first. This
+        # reset used to live inside the `thinking` branch above, which is true only
+        # for sentence 1 of a reply — so sentences 2+ ran with a long-expired grace
+        # window AND the voiced tally that echo accumulated while sentence 1 played,
+        # and self-barged almost immediately. Live evidence (07-22): 8 of 11 cancelled
+        # segments were reason=barge_in, nearly all the last sentence of a reply.
+        self._barge_voiced_ms = 0
+        self._barge_unvoiced_run = 0
+        self._speaking_since = loop.time()
+        self._echo_floor = 0.0
+        self._echo_n = 0
         n = 0
         for i in range(0, len(pcm), _AUDIO_FRAME_BYTES):
             chunk = pcm[i:i + _AUDIO_FRAME_BYTES]
@@ -424,16 +487,16 @@ class VoiceSession:
         await self.emit({"type": "say_end", "say_id": self.say_id})
         return text
 
-    async def _speak_fallback(self) -> None:
+    async def _speak_fallback(self, line: str = _FALLBACK_LINE) -> None:
         loop = self.loop or asyncio.get_running_loop()
         try:
             self.say_id += 1
             self._active_say_id = self.say_id
             await self.emit({"type": "say_start", "say_id": self.say_id,
-                             "turn_id": self.turn_id, "text": _FALLBACK_LINE})
+                             "turn_id": self.turn_id, "text": line})
             if self.state == "thinking":
                 await self._set_state("speaking")
-            pcm = await loop.run_in_executor(None, self.tts.synthesize, _FALLBACK_LINE)
+            pcm = await loop.run_in_executor(None, self.tts.synthesize, line)
             await self.emit({"type": "audio", "say_id": self.say_id, "pcm": pcm,
                              "final": True})
             await self.emit({"type": "say_end", "say_id": self.say_id})

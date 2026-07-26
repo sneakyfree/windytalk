@@ -446,3 +446,126 @@ async def test_fast_producing_turn_survives_immediate_nudge():
         await s.on_mic_frame(_silent())
     assert not prior.done()                       # young turn protected
     prior.cancel()
+
+
+@pytest.mark.asyncio
+async def test_every_segment_resets_barge_grace_and_echo_tally():
+    """Multi-sentence replies: segments 2+ must get the same start-of-speech grace
+    and a clean echo tally that segment 1 gets.
+
+    Live-session evidence (07-22 hand test, transcript.jsonl): 11 of 20 spoken
+    segments were cancelled, 8 of them with reason=barge_in, and they were almost
+    always the LAST sentence of a multi-sentence reply — the user heard the reply
+    start and stop. Cause: the grace/tally reset sat under `if self.state ==
+    "thinking"`, which is only true for the FIRST segment of a turn. Every later
+    sentence therefore ran with an expired grace window AND the voiced-echo tally
+    accumulated while segment 1 was playing, so it self-barged almost immediately.
+
+    Note the pre-existing grace test sets `_speaking_since` by hand, so it passes
+    either way — this one drives the real code path.
+    """
+    s = make_session(FakeBrain([[BrainEvent(kind="text", text="x")]]))
+    await s.start()
+
+    s.state = "thinking"
+    await s._speak_segment("First sentence.")
+    assert s.state == "speaking"
+    first_since = s._speaking_since
+    assert first_since > 0
+
+    # Echo from segment 1 bleeds into the mic while it plays.
+    s._barge_voiced_ms = 999
+    s._barge_unvoiced_run = 7
+    await asyncio.sleep(0.01)
+
+    await s._speak_segment("Second sentence.")
+    assert s._speaking_since > first_since, \
+        "segment 2 did not restart the grace window — it is barge-unprotected"
+    assert s._barge_voiced_ms == 0, \
+        "segment 2 inherited segment 1's echo tally — it can self-barge instantly"
+    assert s._barge_unvoiced_run == 0
+
+
+@pytest.mark.asyncio
+async def test_tool_round_exhaustion_never_ends_in_silence():
+    """A turn must never end without saying SOMETHING.
+
+    Live evidence (07-22 hand test, turn 101): the user asked "Can you find some
+    music for me? I haven't heard you respond" — the engine emitted exactly SIX
+    tool_calls over 18s and then went back to listening without a single say_start.
+    `_stream_and_speak` bounds tool rounds at `range(6)`; on exhaustion it falls out
+    of the loop and returns "" (nothing was ever spoken), and `_run_turn` does
+    `if reply:` with no else — so the turn dies silently. From the user's seat the
+    assistant simply went mute, and because the NEXT turn then answers, the whole
+    conversation slips one question out of phase.
+    """
+    brain = FakeBrain([[BrainEvent(
+        kind="tool_calls",
+        tool_calls=[ToolCall(id="c1", name="open_app", arguments={"name": "x"})])]])
+    s = make_session(brain)
+    await s.start()
+    await s.on_mic(True)
+    await s.on_text("play track six")
+    task = s._turn_task
+    assert task is not None
+
+    async def answer_tools():
+        # Resolve whatever future is actually pending. on_text returns as soon as
+        # the turn task is spawned, so the loop must watch the TASK, not on_text.
+        while not task.done():
+            await asyncio.sleep(0.002)
+            for cid in list(s._tool_futures):
+                await s.on_tool_result(cid, ok=True, result="done")
+
+    helper = asyncio.ensure_future(answer_tools())
+    await task
+    helper.cancel()
+
+    assert brain.calls >= 6, "expected the tool-round limit to be reached"
+    assert any(e["type"] == "say_start" for e in s._events), \
+        "six tool rounds and not one word spoken — the user is left in silence"
+
+
+def _pcm(level: int):
+    """A frame at a chosen amplitude (FakeSTT calls any non-zero frame voiced, so
+    this isolates LEVEL from voicedness)."""
+    return bytes([level, level]) * (FRAME_BYTES // 2)
+
+
+@pytest.mark.asyncio
+async def test_echo_floor_suppresses_self_barge_but_not_real_speech():
+    """AEC-lite: our own speaker bleed must not count as the user interrupting,
+    but a genuinely louder voice still must.
+
+    Measured live against the running engine: with only 5% speaker->mic bleed,
+    webrtcvad called every echo frame voiced and EVERY reply was cut at ~840ms
+    (grace 600 + confirm 240) — the user heard 0.82s of a 5.87s answer. Voicedness
+    alone cannot mean "the user is talking" on a machine with open speakers.
+    So the grace window doubles as calibration: whatever the mic hears while only
+    WE are speaking is the echo floor, and barge evidence must exceed it.
+    """
+    s = make_session(FakeBrain([[BrainEvent(kind="text", text="reply")]]))
+    await s.start()
+    s.mic_on = True
+    s.state = "speaking"
+    s._speaking_since = asyncio.get_running_loop().time()   # grace open
+    s._active_say_id = 2
+    s._turn_task = asyncio.ensure_future(asyncio.sleep(10))
+
+    echo = _pcm(0x10)
+    for _ in range(int(s._barge_grace_ms / 20)):    # calibrate on our own bleed
+        await s.on_mic_frame(echo)
+    assert s._echo_floor > 0, "grace window did not calibrate an echo floor"
+
+    s._speaking_since = 0.0                          # grace now expired
+    for _ in range(s._barge_confirm_ms // 20 + 10):  # sustained echo, same level
+        await s.on_mic_frame(echo)
+    assert not any(e["type"] == "say_cancel" for e in s._events), \
+        "sustained echo at the calibrated floor self-barged — the truncation bug"
+
+    for _ in range(s._barge_confirm_ms // 20 + 1):   # a real, louder interruption
+        await s.on_mic_frame(_pcm(0x60))
+    assert any(e["type"] == "say_cancel" and e.get("reason") == "barge_in"
+               for e in s._events), "a genuine interrupt was swallowed by the echo gate"
+    if s._turn_task:            # the confirmed barge already cancelled it
+        s._turn_task.cancel()
