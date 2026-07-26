@@ -41,15 +41,30 @@ _AUDIO_FRAME_BYTES = TTS_RATE * _AUDIO_FRAME_MS // 1000 * 2  # 960
 _BARGE_CONFIRM_MS = 60           # §7.3 voiced to confirm a barge (within the window)
 _BARGE_VERDICT_MS = 250          # §7.3 engine must reply within 250 ms
 _BARGE_DECAY_MS = 100            # a silence gap this long resets the voiced tally
-# Real-room calibration (2026-07-22 first-voice-session findings): the contract's
-# 60 ms confirm assumes AEC-clean mic frames; with speaker→mic echo it self-
-# cancelled 49/58 replies. So (a) a start-of-speech grace where NO barge can fire,
-# and (b) a higher sustained-voiced confirm — both env-tunable to calibrate against
-# the live acoustic loop without a redeploy. Defaults are conservative (favor
-# letting Windy finish) since a missed barge just means one late interrupt, but a
-# false barge eats the whole answer.
-_BARGE_GRACE_MS = 600            # each speaking phase is un-interruptible this long
-_BARGE_CONFIRM_MS_DEFAULT = 240  # sustained voiced needed once past the grace window
+# Why the contract's 60 ms confirm appeared to fail, and why it now works again.
+#
+# §4.1 requires the CLIENT to send AEC-cleaned mic audio, and §7 rule 3 says confirm
+# on ≥60 ms of voiced. But AEC attenuates echo — it does not remove it, and the
+# residual is still SPEECH-SHAPED. webrtcvad is a speech/non-speech classifier with
+# no loudness opinion, so it calls that residual "voiced" for as long as Windy talks.
+# 60 ms of "voiced" therefore arrives instantly and every reply self-cancelled
+# (49/58 in the first live session; 8 of 11 cancels in the 07-22 hand test).
+#
+# The 2026-07-22 response was to wait longer and hope: a 600 ms un-interruptible
+# grace plus a 240 ms confirm (4x the contract). That traded one bug for two — it
+# put the engine out of spec, and it still only bought 840 ms, less than any real
+# reply, so replies kept getting cut at 0.82 s.
+#
+# The actual missing piece was a LOUDNESS opinion. Voicedness cannot separate "AEC
+# residual" from "the user is talking" — level can. So the engine now calibrates the
+# echo floor from its own bleed-through (see _echo_floor) and requires barge evidence
+# to exceed it. With that discriminator in place the two timing patches are no longer
+# load-bearing and are removed: confirm returns to the contract's 60 ms, and the grace
+# window shrinks to the span actually needed to measure the floor. Verified against a
+# live speaker->mic loopback at 0/5/20/35/60% bleed: no self-barge at any level, and a
+# real interruption still cuts her off at every level.
+_BARGE_GRACE_MS = 300            # start-of-segment window: measures the echo floor,
+                                 # and is un-interruptible while it does so
 
 
 def _env_ms(name: str, default: int) -> int:
@@ -101,8 +116,15 @@ class VoiceSession:
         # without the client needing real AEC. Reset per segment.
         self._echo_floor = 0.0
         self._echo_n = 0
-        self._echo_margin = float(os.environ.get("WINDYTALK_ECHO_MARGIN", "2.5") or 2.5)
-        self._barge_confirm_ms = _env_ms("WINDYTALK_BARGE_CONFIRM_MS", _BARGE_CONFIRM_MS_DEFAULT)
+        # 2.0 chosen by sweep, not taste: at 2.5 a genuine interruption was swallowed
+        # once speaker bleed hit 60% (the floor rose above the user's own voice); at
+        # 1.7 the headroom against self-barge gets thin. 2.0 passed the whole matrix —
+        # no self-barge at 5/20/35/60% bleed, real interrupt still cuts through at
+        # 35% and 60%.
+        self._echo_margin = float(os.environ.get("WINDYTALK_ECHO_MARGIN", "2.0") or 2.0)
+        # Back to the contract's §7 rule 3 value. The 240 ms patch it replaces was
+        # compensating for the missing loudness discriminator, not for real acoustics.
+        self._barge_confirm_ms = _env_ms("WINDYTALK_BARGE_CONFIRM_MS", _BARGE_CONFIRM_MS)
         self._speaking_since: float = 0.0       # monotonic start of the current speaking phase
         # A second segmenter that runs while THINKING so a new utterance spoken
         # mid-processing (before Windy speaks) supersedes the in-flight turn
@@ -232,8 +254,9 @@ class VoiceSession:
             if voiced and (client_signaled or above_echo):
                 self._barge_voiced_ms += FRAME_MS
                 self._barge_unvoiced_run = 0
-                threshold = _BARGE_CONFIRM_MS if client_signaled else self._barge_confirm_ms
-                if self._barge_voiced_ms >= threshold:
+                # One threshold for both paths again (§7 rule 3). They diverged only
+                # while the autonomous path needed a longer fuse to survive echo.
+                if self._barge_voiced_ms >= self._barge_confirm_ms:
                     await self._confirm_barge()
             else:
                 # Decay: a silence gap resets the tally so sparse false-voiced frames
