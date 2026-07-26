@@ -64,6 +64,15 @@ export class VoiceClient {
     private cb: Callbacks = {},
     private clock: Clock = realClock,
     client = { app: "WindyTalk", version: "1", platform: "unknown" },
+    // §6 endpointing. The contract's 700ms default ends the utterance after 0.7s
+    // of quiet, which is shorter than the pauses in ordinary speech — spelling
+    // something out loud ("w-a-g-y-u...") is almost entirely such pauses. Measured
+    // live 2026-07-26: one question arrived as several fragments, the first sent
+    // as the whole question (cut mid-spell) and the rest too short to transcribe,
+    // so they were discarded and the user appeared to be ignored. hello.options.vad
+    // is the contract's own knob for this (clamped engine-side to [200,2000]).
+    private options: { vad?: { silence_ms?: number; min_speech_ms?: number } } =
+      { vad: { silence_ms: 1200 } },
   ) {
     this.client = client;
   }
@@ -82,6 +91,7 @@ export class VoiceClient {
         session_id: this.sessionId ?? undefined,
         resume,
         client: this.client,
+        options: this.options,
       }),
     );
   }

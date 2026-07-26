@@ -369,6 +369,10 @@ class RendererApp {
       onError: (code, msg, fatal) => {
         this.emit({ lastError: `${code}: ${msg}` });
         if (code === "brain_unreachable") this.emit({ brainOk: false });
+        // Speech was captured but couldn't be made out. Show it — silence here is
+        // indistinguishable from "still thinking" and from "the app is broken",
+        // and the user just asks again into the void. Shown, never spoken.
+        if (code === "not_understood") face()?.setCaption("didn’t catch that", "heard");
         if (fatal) {
           this.terminal = true; // §9: fatal ⇒ do not reconnect
           this.emit({ connection: "terminal" });

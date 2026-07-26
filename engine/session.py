@@ -317,6 +317,16 @@ class VoiceSession:
                 self._auditioning = False
             heard = (heard or "").strip()
             if len(heard) < 2:
+                # Say so instead of vanishing. Dropping this silently is why a
+                # chopped-off question is indistinguishable from "still thinking"
+                # and from "the app is broken" — the user gets no signal at all and
+                # simply asks again into the void (measured: clusters of 3-5 of
+                # these seconds apart, one sentence fragmented). Non-fatal; the
+                # client shows it, it is never spoken (speaking it would feed the
+                # echo loop that causes some of these in the first place).
+                await self.emit({"type": "error", "code": "not_understood",
+                                 "message": "didn't catch that",
+                                 "fatal": False})
                 return      # phantom: leave the in-flight turn completely untouched
             user_text, utter_pcm = heard, None
         await self._cancel_turn(reason="superseded")

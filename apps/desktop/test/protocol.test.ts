@@ -297,3 +297,33 @@ test("reconnect floor discards pre-reconnect audio", () => {
   c.onWireMessage(ttsFrame(8, false)); // pre-reconnect → dropped
   assert.equal(plays, 0);
 });
+
+test("hello carries endpointing options — the contract's 700ms cuts real speech", () => {
+  // Measured live 2026-07-26: at the contract default of silence_ms=700 a single
+  // spoken question arrived as several fragments (0.7s of quiet ends the utterance,
+  // and spelling something out loud is almost entirely such pauses). The first
+  // fragment was sent as the whole question, cut mid-spell; the rest were too short
+  // to transcribe and were discarded, so the user appeared to be ignored.
+  // hello.options.vad is the contract's own knob (engine clamps to [200,2000]).
+  const tx = new FakeTransport();
+  const c = new VoiceClient(tx);
+  c.hello();
+  const vad = (tx.last().options as { vad?: { silence_ms?: number } } | undefined)?.vad;
+  assert.ok(vad, "hello sent no endpointing options at all");
+  const ms = vad!.silence_ms!;
+  assert.ok(ms > 700, `silence_ms ${ms} is not more patient than the contract default`);
+  assert.ok(ms <= 2000, "beyond the engine's clamp");
+});
+
+test("hello platform is passed through — the brain needs the USER's OS", () => {
+  // The engine maps darwin -> macOS and tells the brain to use cmd, not ctrl.
+  // The client used to leave this at the "unknown" default, so that never fired and
+  // the hands were driven with ctrl shortcuts on a Mac (ctrl+l does nothing in
+  // Chrome there) — every "open this website" failed in the 2026-07-26 session.
+  const tx = new FakeTransport();
+  const c = new VoiceClient(tx, {}, undefined,
+    { app: "WindyTalk", version: "1", platform: "darwin" });
+  c.hello();
+  const client = tx.last().client as { platform: string };
+  assert.equal(client.platform, "darwin");
+});

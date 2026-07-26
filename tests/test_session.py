@@ -603,3 +603,32 @@ async def test_noise_after_a_reply_does_not_emit_a_phantom_supersede():
     assert not any(e["type"] == "heard" for e in new)
     assert s.turn_id == turn_after_real, \
         f"noise burned a turn_id ({turn_after_real} -> {s.turn_id})"
+
+
+@pytest.mark.asyncio
+async def test_undecipherable_speech_tells_the_user_instead_of_vanishing():
+    """Captured-but-unintelligible speech must produce a signal, not silence.
+
+    Dropping it silently (a bare `return`) is why a question chopped in half by
+    endpointing is indistinguishable from "still thinking" and from "the app is
+    broken" — the 2026-07-26 hand test shows clusters of 3-5 such drops seconds
+    apart, one sentence fragmented, with zero feedback to the user each time.
+    Non-fatal, and shown rather than spoken (speaking it would feed the echo loop
+    that causes some of these).
+    """
+    stt = FakeSTT("")
+    s = make_session(FakeBrain([[BrainEvent(kind="text", text="unused")]]), stt=stt)
+    await s.start()
+    await s.on_mic(True)
+    for _ in range(10):
+        await s.on_mic_frame(_voiced())
+    for _ in range(40):
+        await s.on_mic_frame(_silent())
+    if s._turn_task:
+        await s._turn_task
+
+    errs = [e for e in s._events if e["type"] == "error"]
+    assert errs, "unintelligible speech vanished with no signal at all"
+    assert errs[0]["code"] == "not_understood" and errs[0]["fatal"] is False
+    assert not any(e["type"] == "say_start" for e in s._events), "it must not SPEAK this"
+    assert not any(e["type"] == "heard" for e in s._events)
