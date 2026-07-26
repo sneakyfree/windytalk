@@ -156,9 +156,17 @@
       window.face.setMicUi(s.micOn);
       document.getElementById("btnLabel").textContent = s.micOn ? "On — tap to mute" : "Off — tap to talk";
       const online = s.connection === "online";
+      // Each lamp reports ITS OWN subsystem. These used to be three copies of the
+      // engine websocket state under three labels (#75) — Hands showed green with no
+      // hands server running at all. null = not exercised yet: dim, and the value
+      // reads "—" rather than asserting something we have not observed.
       setSocket("engine", online, "--green");
-      setSocket("brain", online, "--cyan");
-      setSocket("hands", online, "--amber");
+      setSocket("brain", s.brainOk === true, "--cyan");
+      setSocket("hands", s.handsOk === true, "--amber");
+      document.getElementById("sv-brain").textContent =
+        s.brainOk === null ? "—" : s.brainOk ? "Mind" : "unreachable";
+      document.getElementById("sv-hands").textContent =
+        s.handsOk === null ? "—" : s.handsOk ? "Local" : "unavailable";
       document.getElementById("sv-engine").textContent =
         s.connection === "connecting" ? "…" : s.connection === "terminal" ? "closed" : online ? "online" : "offline";
       // panel
