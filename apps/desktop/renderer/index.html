@@ -27,9 +27,13 @@
   #statusRow{display:flex;align-items:center;gap:8px;height:22px;}
   #dot{width:9px;height:9px;border-radius:50%;background:var(--off);box-shadow:0 0 10px currentColor;color:var(--off);transition:all .25s;}
   #state{font-size:13px;letter-spacing:.03em;color:var(--ink);font-weight:600;}
+  /* overflow-wrap:anywhere is load-bearing: a caption with no spaces (a URL, a file
+     path, a run-on token from the model) cannot wrap, so the anonymous flex item
+     grows past BOTH edges of the window — measured 517px wide in a 360px window,
+     text starting at -157. `overflow:hidden` does not save it. */
   #caption{height:36px;margin-top:2px;padding:0 26px;text-align:center;font-size:12px;
     line-height:1.35;color:var(--dim);overflow:hidden;transition:color .2s;display:flex;
-    align-items:center;justify-content:center;}
+    align-items:center;justify-content:center;overflow-wrap:anywhere;min-width:0;}
   #btn{-webkit-app-region:no-drag;margin-top:4px;width:88px;height:88px;border-radius:50%;
     cursor:pointer;border:none;position:relative;background:transparent;outline:none;flex-shrink:0;}
   #ring{position:absolute;inset:0;border-radius:50%;border:2px solid var(--slate);transition:all .25s;}
@@ -43,8 +47,12 @@
   .on #core svg{stroke:var(--cyan);}
   /* sockets */
   #sockets{margin-top:12px;width:calc(100% - 32px);display:flex;gap:8px;flex-shrink:0;}
-  .socket{flex:1;background:var(--card);border:1px solid var(--line);border-radius:12px;
-    padding:9px 10px;text-align:center;}
+  /* min-width:0 is what makes the ellipsis on .val below actually fire. A flex item
+     defaults to min-width:auto, i.e. it refuses to shrink below its content — so a
+     long value ("llama-3.3-70b-versatile") grew the row to 530px in a 360px window
+     and pushed the Hands chip off screen entirely, ellipsis rule and all. */
+  .socket{flex:1;min-width:0;background:var(--card);border:1px solid var(--line);
+    border-radius:12px;padding:9px 10px;text-align:center;}
   .socket .lbl{font-size:9px;letter-spacing:.14em;color:var(--dim2);text-transform:uppercase;}
   .socket .val{font-size:11px;color:var(--ink);margin-top:3px;font-weight:600;
     white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
