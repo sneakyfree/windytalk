@@ -153,12 +153,26 @@
     const STATE_LABEL = { idle:"Ready", listening:"Listening", thinking:"Thinking…",
       speaking:"Speaking", paused:"Paused", offline:"Offline" };
     window.wt && window.wt.onStatus((s) => {
-      window.face.setMicUi(s.micOn);
-      document.getElementById("btnLabel").textContent = s.micOn ? "On — tap to mute" : "Off — tap to talk";
       const online = s.connection === "online";
+      // The mic lamp must not claim to be live when there is nothing to talk TO.
+      // With the engine killed mid-session the face correctly said "Offline" while
+      // this ring stayed lit and the label still read "On — tap to mute" — so the
+      // one control grandma reaches for looked ready when it could do nothing.
+      window.face.setMicUi(s.micOn && online);
+      document.getElementById("btnLabel").textContent =
+        !online ? (s.connection === "terminal" ? "Disconnected" : "Reconnecting…")
+                : s.micOn ? "On — tap to mute" : "Off — tap to talk";
+      // Each lamp reports ITS OWN subsystem. These used to be three copies of the
+      // engine websocket state under three labels (#75) — Hands showed green with no
+      // hands server running at all. null = not exercised yet: dim, and the value
+      // reads "—" rather than asserting something we have not observed.
       setSocket("engine", online, "--green");
-      setSocket("brain", online, "--cyan");
-      setSocket("hands", online, "--amber");
+      setSocket("brain", s.brainOk === true, "--cyan");
+      setSocket("hands", s.handsOk === true, "--amber");
+      document.getElementById("sv-brain").textContent =
+        s.brainOk === null ? "—" : s.brainOk ? "Mind" : "unreachable";
+      document.getElementById("sv-hands").textContent =
+        s.handsOk === null ? "—" : s.handsOk ? "Local" : "unavailable";
       document.getElementById("sv-engine").textContent =
         s.connection === "connecting" ? "…" : s.connection === "terminal" ? "closed" : online ? "online" : "offline";
       // panel

@@ -376,6 +376,14 @@ class VoiceSession:
                 if spoken:
                     reply_parts.append(spoken)
             if errored and not reply_parts:
+                # Tell the client, not just the user's ears. Brain failure was
+                # previously swallowed entirely into the spoken fallback line, so the
+                # client had NO brain-health signal at all — which is why the Brain
+                # lamp had to be faked off the engine's own websocket state (#75).
+                # Non-fatal: the session is fine, this one turn's brain was not.
+                await self.emit({"type": "error", "code": "brain_unreachable",
+                                 "message": "the brain could not be reached for this turn",
+                                 "fatal": False})
                 await self._speak_fallback()
                 return _FALLBACK_LINE
             if not tool_calls:

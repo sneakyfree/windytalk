@@ -29,6 +29,12 @@ export interface Status {
   lastError: string | null;
   heard: string;
   saying: string;
+  // Real health for the other two socket lamps, or null for "we don't know yet".
+  // Before this existed the Brain and Hands lamps were both driven off `connection`
+  // — i.e. they reported the ENGINE websocket three times under three labels (#75).
+  // null renders dim/"—": claiming nothing is honest, claiming green is not.
+  brainOk: boolean | null;
+  handsOk: boolean | null;
 }
 
 type StatusListener = (s: Status) => void;
@@ -82,6 +88,7 @@ class RendererApp {
   private s: Status = {
     connection: "connecting", state: "idle", micOn: false, micError: null,
     sessionId: null, lastError: null, heard: "", saying: "",
+    brainOk: null, handsOk: null,
   };
 
   constructor() {
@@ -335,7 +342,13 @@ class RendererApp {
         this.emit({ state: v });
       },
       onHeard: (text) => { face()?.setCaption(`"${text}"`, "heard"); this.emit({ heard: text }); },
-      onSayStart: (_id, _t, text) => { face()?.setCaption(text, "say"); this.emit({ saying: text }); },
+      // A spoken reply is positive evidence the brain delivered this turn. The
+      // fallback path can't masquerade as one: it emits brain_unreachable first,
+      // and that arrives before its say_start.
+      onSayStart: (_id, _t, text) => {
+        face()?.setCaption(text, "say");
+        this.emit({ saying: text, brainOk: true });
+      },
       onAudio: (_id, pcm) => this.playback.enqueue(pcm),
       onSayEnd: () => {},
       onPausePlayback: () => this.playback.pause(),
@@ -345,6 +358,7 @@ class RendererApp {
       onToolCall: (callId, _turn, tool, args) => this.dispatchTool(callId, tool, args),
       onError: (code, msg, fatal) => {
         this.emit({ lastError: `${code}: ${msg}` });
+        if (code === "brain_unreachable") this.emit({ brainOk: false });
         if (fatal) {
           this.terminal = true; // §9: fatal ⇒ do not reconnect
           this.emit({ connection: "terminal" });
@@ -437,8 +451,10 @@ class RendererApp {
       const res = BRIDGE
         ? await BRIDGE.hands.invoke(tool, args)
         : { ok: false, error: "hands bridge unavailable" };
+      this.emit({ handsOk: res.ok });   // the only real hands-health signal there is
       this.client.sendToolResult(callId, res.ok, res.result ?? "", res.error ?? "");
     } catch (e) {
+      this.emit({ handsOk: false });
       this.client.sendToolResult(callId, false, "", `hands error: ${String(e)}`);
     }
   }
