@@ -25,9 +25,20 @@ are the user's — or Windy's. Switzerland by design.
 | `hands/` | Surface socket: HTTP+MCP control surface, §9 trust tiers, OS backends | Python |
 | `auth/` | brokered ≤5-min Eternitas tokens | Python |
 | `telemetry/` | content-free events → admin.windyword.ai | Python |
-| `apps/` | desktop (Electron) / mobile (RN) / cli — the canonical client + face | TypeScript |
-| `wakeword/` | "Hey Windy" training pipeline + model | Python + ONNX |
+| `apps/` | desktop (Electron) + cli — the canonical client + face | TypeScript |
+| `wakeword/` | "Hey Windy" training pipeline (model is NOT yet trained — see below) | Python + ONNX |
 | `server/` | public endpoint, gating, Cloudflare tunnel | Python + config |
+
+**The tree is 236 tracked files.** A checked-out working copy looks ~50× bigger because
+the desktop build drops ~1.7 GB of *untracked* output in place — `apps/desktop/payload/`
+(bundled Python runtimes), `apps/desktop/release/` (the built `.app`), and
+`apps/desktop/node_modules/`. All three are gitignored build artifacts, not source.
+Use `git ls-files | wc -l` before believing any file count.
+
+**Not built yet:** the "Hey Windy" wake word has a training pipeline but no trained model
+(dev falls back to stock `hey_jarvis`, an explicit release blocker), and the Eternitas
+`windy-talk` entitlement SKU is undefined, so `WINDYTALK_STRICT_AUTH=1` currently denies
+everyone by design.
 
 Prime directive: **the feel is the product** — the §0.1 latency table in the genome is a
 numeric release gate. Contracts before code. One atomic task at a time; never proceed on red.

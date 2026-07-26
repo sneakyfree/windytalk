@@ -1,9 +1,10 @@
 name: CI
 
-# NOTE: GitHub Actions is billing-locked account-wide on sneakyfree (since
-# ~2026-07-04), so this workflow does not execute yet. Until the lock clears the
-# merge gate is a green LOCAL run of `scripts/ci.sh`, which runs the same
-# commands. Keep the two in lockstep.
+# This workflow DOES execute, on our own self-hosted runner (kit0-windytalk on the
+# Kit 0 VPS) — GitHub's HOSTED runners are billing-locked account-wide on sneakyfree,
+# which is why every job here must stay `runs-on: [self-hosted, linux, x64]`
+# (runner-lint enforces it below). `scripts/ci.sh` runs the same commands locally;
+# keep the two in lockstep. Jobs stuck "Queued" mean the runner is down, not billing.
 
 on:
   pull_request:
