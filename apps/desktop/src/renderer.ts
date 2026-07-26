@@ -8,7 +8,8 @@ import { type Callbacks, VoiceClient } from "./protocol.js";
 import { framePcm16, loadWakeDetector, WakeGate } from "./wake.js";
 
 interface WindytalkBridge {
-  cfg: { engineUrl: string; handsUrl: string; appVersion: string; demo: string; autoMic: boolean };
+  cfg: { engineUrl: string; handsUrl: string; appVersion: string; demo: string; autoMic: boolean;
+         platform?: string };
   hands: { invoke(tool: string, args: unknown): Promise<{ ok: boolean; result?: string; error?: string }> };
   control?: {
     pushStatus(s: Status & { lastFrameAtMs: number | null }): void;
@@ -92,7 +93,16 @@ class RendererApp {
   };
 
   constructor() {
-    this.client = new VoiceClient(this.transport(), this.callbacks());
+    // Without this the client sends platform:"unknown" (the VoiceClient default),
+    // the engine's darwin->macOS mapping never fires, and the brain drives the
+    // hands with ctrl shortcuts on a Mac. Observed live 2026-07-26: every attempt
+    // to focus Chrome's address bar sent ctrl+l, which does nothing on macOS, so
+    // "open this website" failed repeatedly. #64 shipped the engine half of this.
+    this.client = new VoiceClient(this.transport(), this.callbacks(), undefined, {
+      app: "WindyTalk",
+      version: BRIDGE?.cfg.appVersion || "1",
+      platform: BRIDGE?.cfg.platform || "unknown",
+    });
   }
 
   async start(): Promise<void> {

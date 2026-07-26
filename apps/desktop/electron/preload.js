@@ -16,6 +16,10 @@ contextBridge.exposeInMainWorld("windytalk", {
     appVersion: process.env.WINDYTALK_APP_VERSION || "0.1.0",
     demo: process.env.WINDYTALK_DEMO || "",
     autoMic: process.env.WINDYTALK_AUTO_MIC === "1",
+    // The engine tells the brain which OS the USER is on so it emits cmd rather
+    // than ctrl (server.py maps darwin->macOS). Only the main/preload side knows
+    // this — the renderer has no `process` — so it has to be handed across here.
+    platform: process.platform,
   },
   hands: {
     invoke: (tool, args) => ipcRenderer.invoke("windytalk:hands", { tool, args }),

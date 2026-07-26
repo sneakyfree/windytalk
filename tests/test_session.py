@@ -569,3 +569,37 @@ async def test_echo_floor_suppresses_self_barge_but_not_real_speech():
                for e in s._events), "a genuine interrupt was swallowed by the echo gate"
     if s._turn_task:            # the confirmed barge already cancelled it
         s._turn_task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_noise_after_a_reply_does_not_emit_a_phantom_supersede():
+    """Speaker echo / a cough must not start a turn at all.
+
+    2026-07-26 hand test: 53 turns started, 29 (55%) never produced a transcript,
+    and 17 completed replies were cancelled `superseded` by those phantoms. Cause:
+    _start_turn cancelled FIRST and only afterwards did _run_turn transcribe and
+    bail on an unintelligible result — so every stray noise burned a turn_id and
+    fired a say_cancel at the client, while the user got nothing back.
+    """
+    stt = FakeSTT("open the calculator")
+    s = make_session(FakeBrain([[BrainEvent(kind="text", text="Opening it now.")]]), stt=stt)
+    await s.start()
+    await _drive_utterance(s)                      # one complete, successful turn
+    assert any(e["type"] == "say_end" for e in s._events)
+    turn_after_real = s.turn_id
+    before = len(s._events)
+
+    stt.text = ""                                  # now only noise reaches the mic
+    for _ in range(10):
+        await s.on_mic_frame(_voiced())
+    for _ in range(40):
+        await s.on_mic_frame(_silent())            # trip EOS on the noise
+    if s._turn_task:
+        await s._turn_task
+
+    new = s._events[before:]
+    assert not any(e["type"] == "say_cancel" for e in new), \
+        "noise fired a phantom say_cancel at the client"
+    assert not any(e["type"] == "heard" for e in new)
+    assert s.turn_id == turn_after_real, \
+        f"noise burned a turn_id ({turn_after_real} -> {s.turn_id})"

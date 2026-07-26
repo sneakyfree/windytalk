@@ -126,6 +126,7 @@ class VoiceSession:
         # compensating for the missing loudness discriminator, not for real acoustics.
         self._barge_confirm_ms = _env_ms("WINDYTALK_BARGE_CONFIRM_MS", _BARGE_CONFIRM_MS)
         self._speaking_since: float = 0.0       # monotonic start of the current speaking phase
+        self._auditioning = False               # transcribing a candidate utterance
         # A second segmenter that runs while THINKING so a new utterance spoken
         # mid-processing (before Windy speaks) supersedes the in-flight turn
         # instead of vanishing — the "you're two questions behind" fix. Disabled
@@ -216,9 +217,11 @@ class VoiceSession:
         if not self.mic_on:
             return
         if self.state == "listening":
+            if self._auditioning:
+                return      # already transcribing a candidate; don't stack a second
             for utter in self._seg.push(pcm):
-                # EOS: leave `listening` synchronously so no second utterance can
-                # race in, then run STT+brain in a task (keeps the recv loop free).
+                # EOS: audition the utterance (STT) before it is allowed to
+                # supersede anything, then run the brain in a task.
                 await self._start_turn(utter_pcm=utter)
                 return
         elif self.state == "speaking":
@@ -291,7 +294,31 @@ class VoiceSession:
     async def _start_turn(self, *, user_text: str | None = None,
                           utter_pcm: bytes | None = None) -> None:
         """Begin a turn from text or a completed utterance. Cancels any in-flight
-        turn first (§11.4: no overlapping turns)."""
+        turn first (§11.4: no overlapping turns) — but only once we know the new
+        utterance is REAL.
+
+        Audition before supersede. Previously this cancelled the in-flight reply
+        immediately, and only afterwards did _run_turn transcribe and bail with a
+        bare `return` on an unintelligible result. So any speaker echo, cough, or
+        room noise that tripped end-of-speech killed the answer in progress and
+        then evaporated silently — the user got nothing, asked again, got nothing,
+        and eventually a later turn answered, which reads exactly as "it's three
+        questions behind". Measured in the 2026-07-26 hand test: 53 turns started,
+        29 of them (55%) never produced a transcript, and 17 completed replies were
+        cancelled `superseded` by those phantoms.
+        """
+        if utter_pcm is not None and user_text is None:
+            loop = self.loop or asyncio.get_running_loop()
+            self._auditioning = True          # don't let a second utterance race in
+            try:
+                heard = await loop.run_in_executor(
+                    None, lambda: self.stt.transcribe(utter_pcm).text)
+            finally:
+                self._auditioning = False
+            heard = (heard or "").strip()
+            if len(heard) < 2:
+                return      # phantom: leave the in-flight turn completely untouched
+            user_text, utter_pcm = heard, None
         await self._cancel_turn(reason="superseded")
         self.turn_id += 1
         self._active_say_id = 0
