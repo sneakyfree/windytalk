@@ -23,7 +23,7 @@ import subprocess
 from urllib.parse import quote_plus, urlparse
 
 from ..coords import geometry_for
-from .base import FocusInfo, HandsBackend, Mechanism, focus_guard, run_chain
+from .base import FocusInfo, HandsBackend, Mechanism, focus_guard, keystroke_guard, run_chain
 
 _APP_ALIASES = {
     "browser": "Safari", "web browser": "Safari", "chrome": "Google Chrome",
@@ -307,6 +307,7 @@ class MacOSBackend(HandsBackend):
 
     def press_keys(self, combo: str) -> str:
         parts = [p.strip().lower() for p in combo.replace(" ", "").split("+") if p.strip()]
+        keystroke_guard(parts, _focused_window())   # bare chars obey the type_text rule
         run_chain([
             Mechanism("cliclick", lambda: _which("cliclick"), lambda: self._cliclick_press(parts)),
             Mechanism("osascript", lambda: _which("osascript"), lambda: _osa_press(parts)),

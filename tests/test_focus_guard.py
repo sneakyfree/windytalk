@@ -352,3 +352,57 @@ def test_screenshot_tool_uses_shared_capture_chain(monkeypatch, tmp_path):
     monkeypatch.setattr(lx, "_capture", lambda dest: None)
     with pytest.raises(UnsupportedTool):
         lx.LinuxBackend().screenshot()
+
+
+# -- press_keys: the guard type_text has, that press_keys did not --------------
+
+def _kg(parts, focus):
+    from hands.backends.base import keystroke_guard
+    return keystroke_guard(parts, focus)
+
+
+TERM = FocusInfo(app="Terminal", title="Windy Talk Terminal")
+EDIT = FocusInfo(app="TextEdit", title="Untitled")
+
+
+def test_press_keys_bare_character_into_a_terminal_is_refused():
+    """The type_text guard was bypassable by spelling the text out.
+
+    Observed live 2026-07-26, seconds apart, unprompted by anyone:
+        type_text {"text":"go","target":"Terminal"} -> refused (terminal)
+        press_keys {"combo":"g"}                    -> ALLOWED
+        press_keys {"combo":"o"}                    -> ALLOWED
+    Same catastrophe class TERMINAL_APPS exists for — characters landing in a
+    live shell, where a newline executes them.
+    """
+    with pytest.raises(GuardRefused) as e:
+        _kg(["g"], TERM)
+    assert "terminal" in str(e.value).lower()
+
+
+def test_press_keys_shortcuts_still_work_in_a_terminal():
+    # A modifier'd combo is a SHORTCUT, not text. Copy/paste and tab-switching
+    # inside a terminal are legitimate and must not be collateral damage.
+    _kg(["cmd", "c"], TERM)
+    _kg(["ctrl", "c"], TERM)
+    _kg(["cmd", "shift", "t"], TERM)
+
+
+def test_press_keys_named_keys_still_work_in_a_terminal():
+    # Named keys carry no text of their own.
+    _kg(["enter"], TERM)
+    _kg(["escape"], TERM)
+    _kg(["up"], TERM)
+
+
+def test_press_keys_bare_character_is_fine_outside_a_terminal():
+    _kg(["g"], EDIT)
+    _kg(["a"], EDIT)
+
+
+def test_press_keys_refuses_to_inject_blind():
+    # Same posture as focus_guard: unresolvable focus means we never type blind.
+    with pytest.raises(GuardRefused):
+        _kg(["g"], None)
+    with pytest.raises(GuardRefused):
+        _kg(["g"], FocusInfo())

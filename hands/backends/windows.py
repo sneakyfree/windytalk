@@ -22,7 +22,7 @@ import shutil
 import subprocess
 
 from ..coords import geometry_for
-from .base import FocusInfo, HandsBackend, UnsupportedTool, focus_guard
+from .base import FocusInfo, HandsBackend, UnsupportedTool, focus_guard, keystroke_guard
 
 # Interpreter chain: Windows PowerShell 5.1 (`powershell`) is the historical
 # default, but a modern / Windows-11-lean box may ship ONLY PowerShell 7
@@ -259,6 +259,7 @@ class WindowsBackend(HandsBackend):
     def press_keys(self, combo: str) -> str:
         parts = [p.strip().lower() for p in combo.replace(" ", "").split("+")
                  if p.strip() and p.strip().lower() not in _SK_DROP]
+        keystroke_guard(parts, _focused_window())   # bare chars obey the type_text rule
         mods = "".join(_SK_MODS[p] for p in parts if p in _SK_MODS)
         keys = "".join(_SK_KEYS.get(p, p) for p in parts if p not in _SK_MODS)
         seq = (mods + "(" + keys + ")") if mods else keys

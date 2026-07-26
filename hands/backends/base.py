@@ -88,6 +88,56 @@ def _guard_disabled() -> bool:
     return os.environ.get("WINDYTALK_TYPE_GUARD", "").lower() in ("off", "0", "disabled")
 
 
+# Modifier names every backend produces after lowercasing and splitting on "+".
+# A combo containing one of these is a SHORTCUT; a bare printable key is TEXT.
+MODIFIER_NAMES = frozenset({
+    "cmd", "command", "ctrl", "control", "alt", "option", "opt", "shift",
+    "win", "super", "meta", "fn", "hyper",
+})
+
+
+def keystroke_guard(parts: list[str], focus: FocusInfo | None) -> None:
+    """The press_keys half of the type_text gate. Raises GuardRefused, else returns.
+
+    `type_text` has been guarded since Phase 0; `press_keys` never was. So a model
+    refused by focus_guard can spell the very same text out one character at a time
+    and land it in a terminal anyway — the guard was bypassable by construction.
+    Observed live on 2026-07-26, seconds apart, with no prompting:
+
+        type_text {"text":"go","target":"Terminal"} -> refused (terminal)
+        press_keys {"combo":"g"}                    -> allowed
+        press_keys {"combo":"o"}                    -> allowed
+
+    That is exactly the catastrophe class TERMINAL_APPS exists to prevent — text
+    arriving in a live shell, where a newline executes it.
+
+    Scope is deliberately narrow so real shortcuts keep working, including inside
+    terminals where copy/paste and tab-switching are legitimate: a combo with ANY
+    modifier (cmd+l, ctrl+c) is a shortcut and passes; a named key (enter, escape,
+    arrow keys) carries no text and passes. Only a bare printable character with no
+    modifier is text injection, and text obeys the same rule type_text obeys.
+    """
+    if _guard_disabled():
+        return
+    mods = [p for p in parts if p in MODIFIER_NAMES]
+    if mods:
+        return                                  # a shortcut, not text
+    chars = [p for p in parts if len(p) == 1 and p.isprintable()]
+    if not chars:
+        return                                  # named keys only (enter, esc, ...)
+    if focus is None or not (focus.app or focus.title):
+        raise GuardRefused(
+            "can't resolve the focused window (accessibility unavailable or no "
+            "active window) — refusing to inject characters blind")
+    if is_terminal_focus(focus):
+        label = focus.app or focus.title
+        raise GuardRefused(
+            f"the focused window is a terminal ({label}) — press_keys will not "
+            "inject characters into terminals either (spelling text out one key "
+            "at a time is the same thing type_text refuses); use run_shell to run "
+            "shell commands")
+
+
 def focus_guard(focus: FocusInfo | None, target: str | None = None) -> str:
     """The type_text safety gate (GAP_CLOSING_PLAN Phase 0 #1). Decide whether
     injected keystrokes may proceed given where focus actually is. Returns the

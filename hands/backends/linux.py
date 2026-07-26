@@ -18,7 +18,15 @@ from pathlib import Path
 from urllib.parse import quote_plus
 
 from ..coords import geometry_for
-from .base import FocusInfo, HandsBackend, Mechanism, UnsupportedTool, focus_guard, run_chain
+from .base import (
+    FocusInfo,
+    HandsBackend,
+    Mechanism,
+    UnsupportedTool,
+    focus_guard,
+    keystroke_guard,
+    run_chain,
+)
 
 
 def _ydotool_socket() -> str:
@@ -413,6 +421,8 @@ class LinuxBackend(HandsBackend):
         return f"Typed {n} character{'s' if n != 1 else ''} into {where}"
 
     def press_keys(self, combo: str) -> str:
+        parts = [p.strip().lower() for p in combo.replace(" ", "").split("+") if p.strip()]
+        keystroke_guard(parts, self._focused_window())   # bare chars obey the type_text rule
         run_chain(self._key_mechs(combo), "press_keys")
         return f"Pressed {combo}"
 
