@@ -552,7 +552,9 @@ async def test_echo_floor_suppresses_self_barge_but_not_real_speech():
     s._active_say_id = 2
     s._turn_task = asyncio.ensure_future(asyncio.sleep(10))
 
-    echo = _pcm(0x10)
+    # Levels chosen to exercise the RATIO, not the clamp: the guard compares against
+    # floor * margin, so both sides must sit in the unsaturated range.
+    echo = _pcm(0x06)
     for _ in range(int(s._barge_grace_ms / 20)):    # calibrate on our own bleed
         await s.on_mic_frame(echo)
     assert s._echo_floor > 0, "grace window did not calibrate an echo floor"
@@ -564,7 +566,7 @@ async def test_echo_floor_suppresses_self_barge_but_not_real_speech():
         "sustained echo at the calibrated floor self-barged — the truncation bug"
 
     for _ in range(s._barge_confirm_ms // 20 + 1):   # a real, louder interruption
-        await s.on_mic_frame(_pcm(0x60))
+        await s.on_mic_frame(_pcm(0x40))
     assert any(e["type"] == "say_cancel" and e.get("reason") == "barge_in"
                for e in s._events), "a genuine interrupt was swallowed by the echo gate"
     if s._turn_task:            # the confirmed barge already cancelled it

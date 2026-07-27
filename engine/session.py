@@ -63,8 +63,31 @@ _BARGE_DECAY_MS = 100            # a silence gap this long resets the voiced tal
 # window shrinks to the span actually needed to measure the floor. Verified against a
 # live speaker->mic loopback at 0/5/20/35/60% bleed: no self-barge at any level, and a
 # real interruption still cuts her off at every level.
+#
+# CORRECTION, 2026-07-27, from a real room instead of a synthetic loopback.
+# The paragraph above was right about the mechanism and wrong to conclude the timing
+# requirement could go entirely. Measured over a live stress session on the Mac mini
+# with real speakers (music playing for part of it):
+#
+#     replies cut by say_cancel(barge_in) .................. 33
+#     cuts the CLIENT's detector also signalled ............  9
+#     cuts the engine invented with no client signal ....... 24  (73%)
+#
+# The client's detector runs the same AEC-cleaned audio through a plain energy
+# threshold and stayed quiet; the engine, on the same audio, fired anyway. So the
+# echo floor alone is not a sufficient discriminator in a real room, where the echo
+# level moves (volume changes, music, the user shifting position) while the floor is
+# only sampled during the grace window.
+#
+# The asymmetry decides the tuning: a FALSE barge destroys the conversation (she is
+# cut off mid-sentence, repeatedly), a MISSED barge costs one repeat. So the
+# autonomous path — a guess about raw audio — now needs more evidence than a
+# client-signalled barge, which is the user's own AEC-backed detector declaring
+# intent. §7 rule 3's 60 ms is kept for the client path exactly as specified; the
+# deviation is confined to rule 5's autonomous path and is recorded here.
 _BARGE_GRACE_MS = 300            # start-of-segment window: measures the echo floor,
                                  # and is un-interruptible while it does so
+_BARGE_AUTONOMOUS_CONFIRM_MS = 200   # rule 5 only; rule 3 (client-signalled) stays 60
 
 
 def _env_ms(name: str, default: int) -> int:
@@ -121,10 +144,14 @@ class VoiceSession:
         # 1.7 the headroom against self-barge gets thin. 2.0 passed the whole matrix —
         # no self-barge at 5/20/35/60% bleed, real interrupt still cuts through at
         # 35% and 60%.
-        self._echo_margin = float(os.environ.get("WINDYTALK_ECHO_MARGIN", "2.0") or 2.0)
+        # 3.5, raised from 2.0 after the 2026-07-27 room test: at 2.0 the engine
+        # invented 24 of 33 cuts that the client's AEC-backed detector never agreed
+        # with. Echo in a real room moves; the floor is only sampled at segment start.
+        self._echo_margin = float(os.environ.get("WINDYTALK_ECHO_MARGIN", "3.5") or 3.5)
         # Back to the contract's §7 rule 3 value. The 240 ms patch it replaces was
         # compensating for the missing loudness discriminator, not for real acoustics.
-        self._barge_confirm_ms = _env_ms("WINDYTALK_BARGE_CONFIRM_MS", _BARGE_CONFIRM_MS)
+        self._barge_confirm_ms = _env_ms("WINDYTALK_BARGE_CONFIRM_MS",
+                                         _BARGE_AUTONOMOUS_CONFIRM_MS)
         self._speaking_since: float = 0.0       # monotonic start of the current speaking phase
         self._auditioning = False               # transcribing a candidate utterance
         # A second segmenter that runs while THINKING so a new utterance spoken
@@ -228,7 +255,7 @@ class VoiceSession:
             # engine-detected barge-in (§7.5): sustained voiced cuts speech.
             fb = _MIC_FRAME_BYTES
             voiced = len(pcm) >= fb and self._seg._is_speech(pcm[:fb], 16000)
-            level = _rms(pcm[:fb]) if len(pcm) >= fb else 0.0
+            level = _rms_raw(pcm[:fb]) if len(pcm) >= fb else 0.0
             self._barge_frames.append(pcm)          # keep for carrying into the new turn
             if len(self._barge_frames) > 40:
                 self._barge_frames.pop(0)
@@ -257,9 +284,13 @@ class VoiceSession:
             if voiced and (client_signaled or above_echo):
                 self._barge_voiced_ms += FRAME_MS
                 self._barge_unvoiced_run = 0
-                # One threshold for both paths again (§7 rule 3). They diverged only
-                # while the autonomous path needed a longer fuse to survive echo.
-                if self._barge_voiced_ms >= self._barge_confirm_ms:
+                # §7 rule 3's 60 ms applies to the CLIENT-signalled path exactly as
+                # written — that is the user's own AEC-backed detector declaring
+                # intent, and it earned its speed. The autonomous path (rule 5) is a
+                # guess about raw audio and needs more, because in a real room it was
+                # wrong 73% of the time at the contract's number.
+                threshold = _BARGE_CONFIRM_MS if client_signaled else self._barge_confirm_ms
+                if self._barge_voiced_ms >= threshold:
                     await self._confirm_barge()
             else:
                 # Decay: a silence gap resets the tally so sparse false-voiced frames
@@ -620,14 +651,23 @@ def _sanitize(text: str) -> str:
     return text if any(c.isalnum() for c in text) else ""
 
 
-def _rms(pcm16: bytes) -> float:
-    """0..1 loudness of a PCM16 chunk, for lip-sync level events."""
+def _rms_raw(pcm16: bytes) -> float:
+    """Unclamped RMS, 0..1 of full scale. The barge gate compares level against a
+    MULTIPLE of the echo floor, and a ratio test cannot be built on a saturating
+    value: _rms() below clamps at 1.0, so once the floor exceeded 1/margin no
+    signal could ever clear the bar and the autonomous path silently disabled
+    itself. Lip-sync still wants the clamped, boosted version; the guard wants
+    this one."""
     n = len(pcm16) // 2
     if n == 0:
         return 0.0
     samples = struct.unpack(f"<{n}h", pcm16[:n * 2])
-    ss = sum(s * s for s in samples) / n
-    return min(1.0, math.sqrt(ss) / 32768.0 * 3.0)
+    return math.sqrt(sum(s * s for s in samples) / n) / 32768.0
+
+
+def _rms(pcm16: bytes) -> float:
+    """0..1 loudness of a PCM16 chunk, for lip-sync level events."""
+    return min(1.0, _rms_raw(pcm16) * 3.0)
 
 
 def _vad_or_none():
