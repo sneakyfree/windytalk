@@ -13,6 +13,7 @@ testable without the C extension.
 """
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Iterator
 
 MIC_RATE = 16000               # voice-session.v1 §3
@@ -48,7 +49,25 @@ def _energy_is_speech(threshold_rms: float | None = None) -> IsSpeech:
     return is_speech
 
 
-def _default_is_speech(aggressiveness: int = 2) -> IsSpeech:
+def _default_is_speech(aggressiveness: int | None = None) -> IsSpeech:
+    """webrtcvad mode 0-3; 3 rejects the most non-speech.
+
+    Raised from 2 to 3 after the 2026-07-29 hand test: 48 utterances opened, cleared
+    the 0.7s length bar, and transcribed to NOTHING. Only 4 of those were near Windy
+    speaking (her own echo) — 44 were plain room noise, one every ~14 seconds, each
+    one flashing "didn't catch that" at the user. Mode 2 was calling ordinary
+    background sound speech-like enough to open an utterance.
+
+    Env-tunable because this is the one dial that trades the two failure modes
+    against each other: too permissive and the room talks to her, too aggressive and
+    a quiet question gets missed. Grant's ears set it, not a synthetic test.
+    """
+    if aggressiveness is None:
+        try:
+            aggressiveness = int(os.environ.get("WINDYTALK_VAD_AGGRESSIVENESS", "3"))
+        except ValueError:
+            aggressiveness = 3
+        aggressiveness = max(0, min(3, aggressiveness))
     try:
         import webrtcvad  # lazy: C extension (no prebuilt wheel on some platforms)
         vad = webrtcvad.Vad(aggressiveness)
