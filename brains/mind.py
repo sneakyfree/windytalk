@@ -30,7 +30,13 @@ from .base import BrainEvent, BrainProvider, ToolCall
 
 DEFAULT_BASE = "https://api.windymind.ai/v1"
 DEFAULT_MODEL = "llama-3.3-70b-versatile"  # fast, consistent TTFT (PROBE_RESULTS)
-DEFAULT_TIMEOUT = 30.0
+# 90s, not 30. The last turn of the 2026-07-28 hand test ("check out the Windy Talk
+# repo and tell me the dirty branch state") died at 21:34:38 having started at
+# 21:34:08 — exactly 30.0s — and the user heard "I'm having trouble reaching my
+# brain", which was a lie: the brain was fine and still thinking. A frontier model
+# doing real work on a multi-step request routinely needs more than 30s, and the
+# engine already protects the user from a genuinely dead brain by other means.
+DEFAULT_TIMEOUT = 90.0
 USER_AGENT = "windytalk/1.0"  # never the urllib default (CF WAF 403s Python-urllib/*)
 
 _SSL_CTX = None

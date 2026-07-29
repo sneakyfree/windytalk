@@ -168,6 +168,7 @@ async def test_engine_detected_barge_after_sustained_voiced():
     await s.start()
     s.mic_on = True
     s.state = "speaking"
+    s._streaming_audio = True      # audio IS playing — there is something to interrupt
     s._speaking_since = 0.0        # far in the past → past the grace window
     s._active_say_id = 2
     s._turn_task = asyncio.ensure_future(asyncio.sleep(5))
@@ -548,6 +549,7 @@ async def test_echo_floor_suppresses_self_barge_but_not_real_speech():
     await s.start()
     s.mic_on = True
     s.state = "speaking"
+    s._streaming_audio = True                              # audio IS playing
     s._speaking_since = asyncio.get_running_loop().time()   # grace open
     s._active_say_id = 2
     s._turn_task = asyncio.ensure_future(asyncio.sleep(10))
@@ -634,3 +636,41 @@ async def test_undecipherable_speech_tells_the_user_instead_of_vanishing():
     assert errs[0]["code"] == "not_understood" and errs[0]["fatal"] is False
     assert not any(e["type"] == "say_start" for e in s._events), "it must not SPEAK this"
     assert not any(e["type"] == "heard" for e in s._events)
+
+
+@pytest.mark.asyncio
+async def test_no_autonomous_barge_while_she_is_silent():
+    """The autonomous detector must only run while audio is actually playing.
+
+    The `speaking` STATE spans a whole turn, including the long silent stretches
+    while tools run. The detector stayed armed through all of it, judging against an
+    echo floor calibrated for a segment that had already ended. Live 2026-07-28:
+    11 of 18 barge cuts fired while she was completely silent, up to 14.9s after
+    say_end — there was nothing to interrupt.
+
+    A client-signalled barge is still honoured here: the user's own AEC-backed
+    detector heard real speech, and redirecting mid-tool-round is legitimate.
+    """
+    s = make_session(FakeBrain([[BrainEvent(kind="text", text="reply")]]))
+    await s.start()
+    s.mic_on = True
+    s.state = "speaking"           # still 'speaking', but between segments
+    s._streaming_audio = False     # ...and no audio is going out
+    s._speaking_since = 0.0        # grace long expired
+    s._echo_floor = 0.0            # stale floor from a finished segment
+    s._active_say_id = 9
+    s._turn_task = asyncio.ensure_future(asyncio.sleep(10))
+
+    for _ in range(s._barge_confirm_ms // 20 + 20):   # plenty of loud voiced audio
+        await s.on_mic_frame(_pcm(0x40))
+    assert not any(e["type"] == "say_cancel" for e in s._events), \
+        "barged while silent — there was nothing playing to interrupt"
+
+    # but the client's own detector must still be able to redirect mid-tool-round
+    await s.on_barge_in(say_id=9)
+    for _ in range(4):
+        await s.on_mic_frame(_pcm(0x40))
+    assert any(e["type"] == "say_cancel" and e.get("reason") == "barge_in"
+               for e in s._events), "client-signalled barge was swallowed too"
+    if s._turn_task:
+        s._turn_task.cancel()

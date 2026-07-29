@@ -154,6 +154,13 @@ class VoiceSession:
                                          _BARGE_AUTONOMOUS_CONFIRM_MS)
         self._speaking_since: float = 0.0       # monotonic start of the current speaking phase
         self._auditioning = False               # transcribing a candidate utterance
+        # True only while audio frames are actually leaving for this segment. The
+        # `speaking` STATE persists across a whole turn — including the long silent
+        # stretches while tools run — but there is nothing to barge into when no
+        # audio is playing, and the echo floor from a segment that ended 15s ago is
+        # meaningless. Measured 2026-07-28: 11 of 18 barge cuts fired while she was
+        # completely silent, up to 14.9s after say_end, during tool rounds.
+        self._streaming_audio = False
         # A second segmenter that runs while THINKING so a new utterance spoken
         # mid-processing (before Windy speaks) supersedes the in-flight turn
         # instead of vanishing — the "you're two questions behind" fix. Disabled
@@ -266,6 +273,15 @@ class VoiceSession:
             # the higher sustained threshold — the fix for "only the first word came
             # out" without weakening a real interrupt.
             client_signaled = self._barge_verdict is not None
+            # Nothing is playing → nothing to barge into. The `speaking` STATE spans
+            # the whole turn, including the long silent stretches while tools run, and
+            # the autonomous detector stayed armed through all of it against an echo
+            # floor measured for a segment that had already ended. Live 2026-07-28:
+            # 11 of 18 barge cuts fired while she was SILENT, up to 14.9s after
+            # say_end. A client-signalled barge still counts here — the user's own
+            # detector heard real speech, and redirecting mid-tool-round is legitimate.
+            if not self._streaming_audio and not client_signaled:
+                return
             loop = self.loop or asyncio.get_running_loop()
             in_grace = (loop.time() - self._speaking_since) * 1000 < self._barge_grace_ms
             if in_grace and not client_signaled:
@@ -549,6 +565,7 @@ class VoiceSession:
         self._speaking_since = loop.time()
         self._echo_floor = 0.0
         self._echo_n = 0
+        self._streaming_audio = True
         n = 0
         for i in range(0, len(pcm), _AUDIO_FRAME_BYTES):
             chunk = pcm[i:i + _AUDIO_FRAME_BYTES]
@@ -560,6 +577,7 @@ class VoiceSession:
             n += 1
             if self.pace:
                 await asyncio.sleep(_AUDIO_FRAME_MS / 1000.0)  # keep unsent audio cancellable
+        self._streaming_audio = False
         await self.emit({"type": "say_end", "say_id": self.say_id})
         return text
 
