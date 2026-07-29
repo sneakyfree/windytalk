@@ -32,18 +32,42 @@ on example.com located the link visually and clicked it, and the browser navigat
 `iana.org/help/example-domains`. Without it, the same call returns "Couldn't find a
 clickable element".
 
-**Cost, measured on this setup — this is the real tradeoff:**
+**Cost — and the real cause, which is NOT the prompt.**
 
-| model | latency | result |
+First measurement said 42s warm / 77s cold, and blamed `MAX_TOKENS = 8000` letting a
+thinking model ramble. That was wrong: the model emits ~216-356 completion tokens.
+Instrumenting the call directly showed where the time actually goes.
+
+| condition | latency | result |
 |---|---|---|
-| `qwen3-vl:32b` cold | 77 s | correct |
-| `qwen3-vl:32b` warm | 42 s | correct |
-| `qwen2.5vl:7b` | 21 s | **missed the link** |
+| `qwen3-vl:32b`, model NOT resident | 77-90 s | correct |
+| `qwen3-vl:32b`, model pinned in VRAM | **11-14 s** | correct, 3/3 |
+| `qwen2.5vl:7b` | 6-8 s | **unreliable — see below** |
 
-42 s to click one link is not conversational. The 7B is fast and wrong, which is worse
-than slow and right. Before reaching for a different model, note `MAX_TOKENS = 8000` in
-`vision.py`: qwen3-vl is a thinking model and is being given room to reason at length
-for what is ultimately a coordinate — that is the first thing to tune.
+**Nearly all of the 90 s was ollama loading the model**, not inference or prompt
+processing. Veron's GPU is 32 GB; `qwen3-vl:32b` occupies ~24 GB resident and
+`qwen3-coder:30b` ~21 GB, so the two cannot co-reside and evict each other on every
+switch. Whichever model the *other* consumer wants, the next vision call pays a full
+21 GB reload.
+
+Two things worth knowing before tuning this:
+
+- **`keep_alive` cannot be set from the OpenAI-compatible endpoint.** Ollama accepts
+  the field in `/v1/chat/completions` without error and ignores it — the expiry moved
+  90 s, not the 2 h requested. It has to come from `OLLAMA_KEEP_ALIVE` on the server
+  (already `30m` on Veron) or a native `/api/generate` preload.
+- **`OLLAMA_NUM_PARALLEL=6` inflates residency roughly 3x.** `qwen2.5vl:7b` is a ~6 GB
+  model and was measured occupying **18.7 GB** resident, because ollama sizes KV cache
+  for six concurrent slots. For a single-user vision workload this is most of why
+  nothing co-resides. Lowering it would likely let a vision model and a coder model
+  share the card — but Veron is a shared production box (the windy-stt lane lives
+  there too), so that is Grant's call, not a change to make quietly.
+
+**Don't reach for the 7B to go faster.** It is quicker but does not follow the output
+contract: on a full-desktop screenshot it returned `x1: 1167` — absolute pixels, when
+the prompt asks for 0-1000 normalized — and emitted malformed JSON with stray bare
+numbers. On a cropped image it normalized correctly. It is a formatting problem, not
+only a seeing problem, and silently produces coordinates that land in the wrong place.
 
 **Screen Recording permission is required** for any of this: without it `screencapture`
 silently writes a wallpaper-only image and the vision spine is blind while still
