@@ -674,3 +674,31 @@ async def test_no_autonomous_barge_while_she_is_silent():
                for e in s._events), "client-signalled barge was swallowed too"
     if s._turn_task:
         s._turn_task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_short_noise_does_not_announce_didnt_catch_that():
+    """A cough or a chair squeak must not make the mic feel hair-trigger.
+
+    An utterance opens on 150 ms of voiced audio, which furniture clears easily.
+    Announcing "didn't catch that" at every one of those fired 61 notices in a
+    28-minute session — Grant's report: "if I breathed a little heavy or coughed,
+    it would say I didn't catch that". Below the threshold it is noise and is
+    dropped in silence, as the engine always did; above it, somebody said something
+    real and losing it wordlessly is the bug the notice exists to fix.
+    """
+    stt = FakeSTT("")                      # nothing transcribable either way
+    s = make_session(FakeBrain([[BrainEvent(kind="text", text="unused")]]), stt=stt)
+    await s.start()
+    await s.on_mic(True)
+
+    short = b"\x10\x10" * (FRAME_BYTES // 2) * 10        # ~0.2s — a cough
+    await s._start_turn(utter_pcm=short)
+    assert not [e for e in s._events if e["type"] == "error"], \
+        "a cough announced 'didn't catch that'"
+
+    long = b"\x10\x10" * (FRAME_BYTES // 2) * 60         # ~1.2s — a real utterance
+    await s._start_turn(utter_pcm=long)
+    errs = [e for e in s._events if e["type"] == "error"]
+    assert errs and errs[0]["code"] == "not_understood", \
+        "a real lost utterance vanished with no signal"

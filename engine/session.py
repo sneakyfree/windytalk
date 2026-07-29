@@ -103,6 +103,9 @@ _FALLBACK_LINE = "Sorry, I'm having trouble reaching my brain right now."
 # Saying "trouble reaching my brain" there would be a lie, and silence is worse —
 # the user cannot tell a mute turn from a crashed app.
 _NO_REPLY_LINE = "Sorry, I didn't get that one finished. Could you say it again?"
+# Shortest unintelligible utterance still worth telling the user about. Under this
+# it is a cough, a breath, or a chair moving — furniture, not a lost question.
+_NOTICE_MIN_UTTERANCE_S = 0.7
 
 
 class VoiceSession:
@@ -364,16 +367,19 @@ class VoiceSession:
                 self._auditioning = False
             heard = (heard or "").strip()
             if len(heard) < 2:
-                # Say so instead of vanishing. Dropping this silently is why a
-                # chopped-off question is indistinguishable from "still thinking"
-                # and from "the app is broken" — the user gets no signal at all and
-                # simply asks again into the void (measured: clusters of 3-5 of
-                # these seconds apart, one sentence fragmented). Non-fatal; the
-                # client shows it, it is never spoken (speaking it would feed the
-                # echo loop that causes some of these in the first place).
-                await self.emit({"type": "error", "code": "not_understood",
-                                 "message": "didn't catch that",
-                                 "fatal": False})
+                # Tell the user only if that could plausibly have been a QUESTION.
+                # An utterance opens on 150 ms of voiced audio, which a cough, a
+                # breath or a chair squeak clears easily — and announcing "didn't
+                # catch that" at every one of those makes the mic feel hair-trigger
+                # (61 notices in a 28-minute session, most of them furniture). Below
+                # this, it was noise, not a lost question: drop it in silence exactly
+                # as the engine always did. Above it, somebody said something real
+                # and losing it wordlessly is the bug this notice exists to fix.
+                secs = len(utter_pcm) / 2 / 16000
+                if secs >= _NOTICE_MIN_UTTERANCE_S:
+                    await self.emit({"type": "error", "code": "not_understood",
+                                     "message": "didn't catch that",
+                                     "fatal": False})
                 return      # phantom: leave the in-flight turn completely untouched
             user_text, utter_pcm = heard, None
         await self._cancel_turn(reason="superseded")
