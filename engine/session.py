@@ -170,7 +170,18 @@ class VoiceSession:
         # with WINDYTALK_NO_THINK_SUPERSEDE=1.
         self._think_seg = self._fresh_seg()
         self._think_supersede = os.environ.get("WINDYTALK_NO_THINK_SUPERSEDE") != "1"
-        self._supersede_stuck_ms = _env_ms("WINDYTALK_SUPERSEDE_STUCK_MS", 8000)
+        # 25s, raised from 8s after the 2026-07-29 hand test, where Grant asked seven
+        # questions over four and a half minutes and heard NOTHING back. The engine
+        # was answering — it had degraded to ~13s per turn (4.5s on a fresh process)
+        # — but 8s is SHORTER than a normal turn, so every reply became supersede-able
+        # before it could finish. He reasonably re-asked at ~20s intervals, each new
+        # question killed the in-flight answer, and the loop never converged: seven
+        # turns went `-> thinking` and not one produced a word.
+        #
+        # This threshold must sit ABOVE a realistic turn, not below it, or slowness
+        # silently becomes total silence. A turn that has emitted nothing for 25s is
+        # genuinely stuck; one at 10s is just thinking.
+        self._supersede_stuck_ms = _env_ms("WINDYTALK_SUPERSEDE_STUCK_MS", 25000)
         self._turn_started_at: float = 0.0
         self._turn_produced = False             # has this turn emitted a tool_call or speech?
         self._history: list[dict] = []

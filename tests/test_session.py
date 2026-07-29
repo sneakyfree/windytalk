@@ -702,3 +702,45 @@ async def test_short_noise_does_not_announce_didnt_catch_that():
     errs = [e for e in s._events if e["type"] == "error"]
     assert errs and errs[0]["code"] == "not_understood", \
         "a real lost utterance vanished with no signal"
+
+
+@pytest.mark.asyncio
+async def test_a_normal_length_turn_is_not_superseded_by_a_follow_up():
+    """Slowness must not become total silence.
+
+    2026-07-29 hand test: seven questions over four and a half minutes, not one
+    answered. The engine WAS working — degraded to ~13s per turn against 4.5s on a
+    fresh process — but the supersede threshold was 8s, SHORTER than a normal turn.
+    So every reply became supersede-able before finishing, Grant reasonably re-asked
+    at ~20s intervals, and each new question killed the answer in flight. Seven turns
+    went `-> thinking` and produced nothing.
+
+    The threshold has to sit above a realistic turn, not below it.
+    """
+    s = make_session(FakeBrain([[BrainEvent(kind="text", text="the answer")]]))
+    await s.start()
+    await s.on_mic(True)
+    await s.on_text("first question")
+    first = s._turn_task
+    assert first is not None
+
+    # a turn that started 10s ago and hasn't spoken yet is THINKING, not stuck
+    s._turn_started_at = (s.loop or asyncio.get_running_loop()).time() - 10.0
+    s._turn_produced = False
+    s.state = "thinking"
+    for _ in range(10):
+        await s.on_mic_frame(_voiced())
+    for _ in range(40):
+        await s.on_mic_frame(_silent())
+    assert s._turn_task is first, "a 10s turn was superseded — slowness becomes silence"
+
+    # but one silent for 30s really is stuck and may be replaced
+    s._turn_started_at = (s.loop or asyncio.get_running_loop()).time() - 30.0
+    s.state = "thinking"
+    for _ in range(10):
+        await s.on_mic_frame(_voiced())
+    for _ in range(40):
+        await s.on_mic_frame(_silent())
+    assert s._turn_task is not first, "a genuinely stuck turn was never replaced"
+    if s._turn_task:
+        await s._turn_task
