@@ -744,3 +744,52 @@ async def test_a_normal_length_turn_is_not_superseded_by_a_follow_up():
     assert s._turn_task is not first, "a genuinely stuck turn was never replaced"
     if s._turn_task:
         await s._turn_task
+
+
+@pytest.mark.asyncio
+async def test_a_long_silent_turn_volunteers_that_it_is_still_working(monkeypatch):
+    """A yellow dot cannot say whether she is 5 seconds out or dead.
+
+    2026-07-29: a turn sat silent for 90s (the brain timeout) and Grant asked out
+    loud, "you've been yellow for quite a while, are you still working on it?" The
+    face was telling the truth; it just could not tell him ENOUGH. The doctrine
+    names this proactive honesty and wants it (P7).
+    """
+    import engine.session as sess
+    monkeypatch.setattr(sess, "_WORKING_AFTER_S", 0.05)   # keep the test fast
+
+    class SlowBrain:
+        def stream(self, messages, tools=None, model=None):
+            import time
+            time.sleep(0.5)                                # longer than the threshold
+            yield BrainEvent(kind="text", text="Here is the answer.")
+            yield BrainEvent(kind="done", finish_reason="stop")
+
+    s = make_session(SlowBrain())
+    await s.start()
+    await s.on_mic(True)
+    await s.on_text("something that takes a while")
+    if s._turn_task:
+        await s._turn_task
+
+    spoken = [e.get("text", "") for e in s._events if e["type"] == "say_start"]
+    assert any("still working" in t.lower() for t in spoken), \
+        "sat silent through a long turn and told the user nothing"
+    assert any("here is the answer" in t.lower() for t in spoken), \
+        "the courtesy line replaced the real answer instead of preceding it"
+
+
+@pytest.mark.asyncio
+async def test_a_normal_speed_turn_never_mentions_still_working(monkeypatch):
+    # The courtesy line must be invisible at healthy speed, or it becomes noise.
+    import engine.session as sess
+    monkeypatch.setattr(sess, "_WORKING_AFTER_S", 5.0)
+    s = make_session(FakeBrain([[BrainEvent(kind="text", text="Quick answer.")]]))
+    await s.start()
+    await s.on_mic(True)
+    await s.on_text("something quick")
+    if s._turn_task:
+        await s._turn_task
+    spoken = [e.get("text", "") for e in s._events if e["type"] == "say_start"]
+    assert not any("still working" in t.lower() for t in spoken)
+    assert any("quick answer" in t.lower() for t in spoken)

@@ -106,6 +106,12 @@ _NO_REPLY_LINE = "Sorry, I didn't get that one finished. Could you say it again?
 # Shortest unintelligible utterance still worth telling the user about. Under this
 # it is a cough, a breath, or a chair moving — furniture, not a lost question.
 _NOTICE_MIN_UTTERANCE_S = 0.7
+# How long a turn may sit silent before she volunteers that she is still on it.
+# 18s: comfortably longer than a normal turn (~4-6s here, occasionally 15s with
+# tool rounds) so a healthy reply never triggers it, and far short of the 90s brain
+# timeout that left Grant staring at a yellow dot with no information.
+_WORKING_AFTER_S = 18.0
+_STILL_WORKING_LINE = "Still working on that one — hang with me."
 
 
 class VoiceSession:
@@ -424,7 +430,18 @@ class VoiceSession:
             await self._set_state("thinking")  # §6: announced AFTER heard{final}
             self._history.append({"role": "user", "content": user_text})
             self._partial_reply = []
-            reply = await self._stream_and_speak()
+            # Say something if the thinking runs long. 2026-07-29: a turn sat silent
+            # for 90s (the brain timeout) and Grant asked out loud "you've been
+            # yellow for quite a while, are you still working on it?" — the face
+            # showed thinking, correctly, but a yellow dot cannot say whether it is
+            # 5 seconds from an answer or dead. The doctrine calls this out as
+            # proactive honesty and explicitly wants it (P7).
+            waiter = (self.loop or asyncio.get_running_loop()).create_task(
+                self._say_still_working())
+            try:
+                reply = await self._stream_and_speak()
+            finally:
+                waiter.cancel()
             if reply:
                 self._history.append({"role": "assistant", "content": reply})
             else:
@@ -597,6 +614,19 @@ class VoiceSession:
         self._streaming_audio = False
         await self.emit({"type": "say_end", "say_id": self.say_id})
         return text
+
+    async def _say_still_working(self) -> None:
+        """After _WORKING_AFTER_S of a silent turn, say so once. Cancelled the moment
+        real output appears, so a normal-speed reply never hears from this at all."""
+        try:
+            await asyncio.sleep(_WORKING_AFTER_S)
+            if self._turn_produced or self.state != "thinking":
+                return                      # already talking or already tool-calling
+            await self._speak_fallback(_STILL_WORKING_LINE)
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass    # a courtesy line must never be able to break the turn
 
     async def _speak_fallback(self, line: str = _FALLBACK_LINE) -> None:
         loop = self.loop or asyncio.get_running_loop()
