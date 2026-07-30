@@ -69,6 +69,15 @@ class MindBrain(BrainProvider):
             or os.environ.get("WINDY_MIND_DEV_KEY", "")
         self.model = model or os.environ.get("WINDYTALK_BRAIN_MODEL", DEFAULT_MODEL)
         self.timeout = timeout
+        # What ACTUALLY served the last turn. Mind is a broker: when a provider is
+        # down it silently falls back and still reports the requested model at the
+        # top level, so the only honest signal is the model/_provider it returns.
+        # Live on 2026-07-30, every external provider was erroring and Mind served
+        # qwen2.5:7b-instruct for a whole hand-test session while Grant believed he
+        # was testing Opus — he only noticed because it said its cutoff was early
+        # 2025. Nothing in the voice path surfaced it. Never again.
+        self.last_model: str = ""
+        self.last_provider: str = ""
 
     # -- transport (injectable for tests) --------------------------------------
 
@@ -107,6 +116,8 @@ class MindBrain(BrainProvider):
         """One whole-reply turn: same events as stream(), delivered in one burst."""
         try:
             data = self._post_json(body)
+            self.last_model = str(data.get("model") or "")
+            self.last_provider = str(data.get("_provider") or "")
             message = ((data.get("choices") or [{}])[0]).get("message") or {}
             finish = ((data.get("choices") or [{}])[0]).get("finish_reason")
         except (urllib.error.URLError, TimeoutError, OSError) as e:

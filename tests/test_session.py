@@ -829,3 +829,58 @@ async def test_conversation_survives_an_engine_restart(tmp_path, monkeypatch):
     fresh = make_session(FakeBrain([[BrainEvent(kind="text", text="ok")]]),
                          session_id="s-somebody-else")
     assert fresh._history == [] and fresh.resumed is False, "sessions leaked into each other"
+
+
+@pytest.mark.asyncio
+async def test_a_substituted_brain_is_announced_once():
+    """Mind falling back to another model must never be silent.
+
+    2026-07-30: every external provider was erroring, Mind served
+    qwen2.5:7b-instruct for an entire hand-test session while reporting
+    claude-opus-4-8 at the top level of the response, and Grant tested a model he
+    was not using. He only noticed because it volunteered that its training cutoff
+    was early 2025. The voice path said nothing.
+
+    Once per session, not per turn — news the first time, nagging after that.
+    """
+    class SwappedBrain(FakeBrain):
+        model = "claude-opus-4-8"          # what we asked for
+        last_model = "qwen2.5:7b-instruct"  # what actually answered
+
+    brain = SwappedBrain([[BrainEvent(kind="text", text="an answer")]])
+    s = make_session(brain, session_id="s-fallback")
+    await s.start()
+    await s.on_mic(True)
+
+    await s.on_text("first question")
+    if s._turn_task:
+        await s._turn_task
+    spoken = " ".join(e.get("text", "") for e in s._events if e["type"] == "say_start")
+    assert "backup brain" in spoken.lower(), "brain substitution was silent"
+    assert "qwen2.5:7b-instruct" in spoken, "did not name what is actually serving"
+    errs = [e for e in s._events if e["type"] == "error"]
+    assert errs and errs[0]["code"] == "brain_fallback" and errs[0]["fatal"] is False
+
+    before = len(s._events)
+    await s.on_text("second question")
+    if s._turn_task:
+        await s._turn_task
+    again = " ".join(e.get("text", "") for e in s._events[before:] if e["type"] == "say_start")
+    assert "backup brain" not in again.lower(), "nagged about it on every turn"
+
+
+@pytest.mark.asyncio
+async def test_no_announcement_when_the_requested_brain_answered():
+    class NormalBrain(FakeBrain):
+        model = "claude-opus-4-8"
+        last_model = "claude-opus-4-8"
+    s = make_session(NormalBrain([[BrainEvent(kind="text", text="an answer")]]),
+                     session_id="s-nofallback")
+    await s.start()
+    await s.on_mic(True)
+    await s.on_text("a question")
+    if s._turn_task:
+        await s._turn_task
+    spoken = " ".join(e.get("text", "") for e in s._events if e["type"] == "say_start")
+    assert "backup brain" not in spoken.lower()
+    assert not [e for e in s._events if e["type"] == "error"]

@@ -215,6 +215,7 @@ class VoiceSession:
                                          _BARGE_AUTONOMOUS_CONFIRM_MS)
         self._speaking_since: float = 0.0       # monotonic start of the current speaking phase
         self._auditioning = False               # transcribing a candidate utterance
+        self._fallback_announced = False        # brain-substitution notice, once per session
         # True only while audio frames are actually leaving for this segment. The
         # `speaking` STATE persists across a whole turn — including the long silent
         # stretches while tools run — but there is nothing to barge into when no
@@ -510,6 +511,8 @@ class VoiceSession:
                 await self._speak_fallback(_NO_REPLY_LINE)
                 self._history.append({"role": "assistant", "content": _NO_REPLY_LINE})
                 save_history(self.session_id, self._history)
+            # Whatever the turn produced, if a DIFFERENT model served it, say so.
+            await self._announce_brain_substitution()
         except asyncio.CancelledError:
             # A cancelled (barged/superseded) reply must still enter history —
             # otherwise the brain has no memory it ever answered and confabulates
@@ -673,6 +676,36 @@ class VoiceSession:
         self._streaming_audio = False
         await self.emit({"type": "say_end", "say_id": self.say_id})
         return text
+
+    async def _announce_brain_substitution(self) -> None:
+        """Say it out loud when Mind served a DIFFERENT model than we asked for.
+
+        Mind is a broker; when a provider is down it falls back silently and still
+        reports the requested model at the top level of the response. On 2026-07-30
+        every external provider was erroring and it served qwen2.5:7b-instruct for a
+        whole hand-test session while Grant believed he was testing Opus. He only
+        caught it because the model volunteered that its training cutoff was early
+        2025. Nothing in the voice path said a word.
+
+        Once per session, not per turn — this is news the first time and nagging
+        after that. Never raises: a courtesy notice must not break the turn.
+        """
+        try:
+            if self._fallback_announced:
+                return
+            got = (getattr(self.brain, "last_model", "") or "").strip()
+            want = (getattr(self.brain, "model", "") or "").strip()
+            if not got or not want or got == want:
+                return
+            self._fallback_announced = True
+            await self.emit({"type": "error", "code": "brain_fallback",
+                             "message": f"running on {got}, not {want}",
+                             "fatal": False})
+            await self._speak_fallback(
+                f"Heads up — I'm running on a backup brain right now, {got}, "
+                f"not {want}. I'll be less sharp than usual.")
+        except Exception:
+            pass
 
     async def _say_still_working(self) -> None:
         """After _WORKING_AFTER_S of a silent turn, say so once. Cancelled the moment
