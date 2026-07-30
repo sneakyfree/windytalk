@@ -23,6 +23,7 @@ import { ConfigStore } from "../dist/electron/control/config.js";
 import { EngineAllowList } from "../dist/electron/control/engine-allow.js";
 import { RecoveryCoordinator } from "../dist/electron/control/coordinator.js";
 import { CrashLoopDetector } from "../dist/electron/control/layer1.js";
+import { SlownessDetector } from "../dist/electron/control/slowness.js";
 import { Supervisor } from "../dist/electron/control/supervisor.js";
 import { ControlTools } from "../dist/electron/control/tools.js";
 import { ControlMcp } from "../dist/electron/control/mcp.js";
@@ -163,6 +164,22 @@ async function bootControlPlane() {
   const allowList = new EngineAllowList(paths.configDir);
   const coordinator = new RecoveryCoordinator();
   let tools = null; // created below; the detector's trip closes over it
+  let lastCountedTurnMs = null; // status repeats on a 5s heartbeat; count each turn once
+  // Layer 1's OTHER sense. The crash detector below sees processes die; this sees
+  // the thing rot while still technically alive — the engine that went 3x slower
+  // over 13 hours, the brain silently swapped for a 7B model. Neither ever crashed,
+  // and both were found by Grant noticing, not by the supervisor.
+  const slowness = new SlownessDetector({
+    requestRecovery: (reason) => {
+      slog(`layer1 slowness: ${reason} — deep-reconnecting`, "warn");
+      supervisor.notice("Things were getting slow, so I reset my connection. "
+                        + "We can pick up where we left off.");
+      supervisor.deepReconnectEngine(20000)
+        .then((ok) => { if (ok) slowness.resetAfterRecovery(); })
+        .catch(() => {});
+    },
+    log: (m) => slog(m),
+  });
   const detector = new CrashLoopDetector({
     tripSafeMode: (reason) => {
       slog(`layer1 safe-mode trip: ${reason}`, "warn");
@@ -276,6 +293,13 @@ async function bootControlPlane() {
       slog(`engine connection: ${lastConn ?? "boot"} -> ${status.connection}`,
         status.connection === "online" ? "info" : "warn");
       lastConn = status.connection;
+    }
+    // Feed Layer 1's degradation sense. Status is pushed on every change AND on a
+    // 5s heartbeat, so the same turn arrives repeatedly — only count a latency once.
+    if (status && typeof status.lastTurnMs === "number"
+        && status.lastTurnMs !== lastCountedTurnMs) {
+      lastCountedTurnMs = status.lastTurnMs;
+      slowness.noteTurn(status.lastTurnMs);
     }
     supervisor.onRendererStatus(status);
   });

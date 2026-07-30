@@ -36,6 +36,10 @@ export interface Status {
   // null renders dim/"—": claiming nothing is honest, claiming green is not.
   brainOk: boolean | null;
   handsOk: boolean | null;
+  /** Last completed turn: heard{final} -> her first say_start, in ms. Feeds Layer
+   *  1's slowness sense — the degradation that never crashes and so was never
+   *  noticed by anything but Grant. Null until a turn completes. */
+  lastTurnMs: number | null;
 }
 
 type StatusListener = (s: Status) => void;
@@ -78,6 +82,7 @@ class RendererApp {
   private micWanted = false; // the user's intent (button)
   private wake: WakeGate | null = null; // "Hey Windy" gate (null until a model loads)
   private wakeMode = false; // hands-free: gate mic frames through the wake word
+  private turnStartedAt: number | null = null; // heard{final} -> first say_start
   private ready = false; // engine sent `ready` (gate binary until then, §11.1)
   private terminal = false; // bye/fatal ⇒ never auto-reconnect (§9)
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -89,7 +94,7 @@ class RendererApp {
   private s: Status = {
     connection: "connecting", state: "idle", micOn: false, micError: null,
     sessionId: null, lastError: null, heard: "", saying: "",
-    brainOk: null, handsOk: null,
+    brainOk: null, handsOk: null, lastTurnMs: null,
   };
 
   constructor() {
@@ -351,13 +356,26 @@ class RendererApp {
         this.worklet?.port.postMessage({ type: "speaking", on: v === "speaking" });
         this.emit({ state: v });
       },
-      onHeard: (text) => { face()?.setCaption(`"${text}"`, "heard"); this.emit({ heard: text }); },
+      onHeard: (text) => {
+        face()?.setCaption(`"${text}"`, "heard");
+        // Start the clock on the number the user actually feels: from "I stopped
+        // talking" to "she started talking". Layer 1's slowness sense runs on this.
+        this.turnStartedAt = Date.now();
+        this.emit({ heard: text });
+      },
       // A spoken reply is positive evidence the brain delivered this turn. The
       // fallback path can't masquerade as one: it emits brain_unreachable first,
       // and that arrives before its say_start.
       onSayStart: (_id, _t, text) => {
         face()?.setCaption(text, "say");
-        this.emit({ saying: text, brainOk: true });
+        // FIRST segment only — say_start fires per sentence, and only the first one
+        // answers "how long did she make me wait".
+        const started = this.turnStartedAt;
+        this.turnStartedAt = null;
+        this.emit({
+          saying: text, brainOk: true,
+          ...(started ? { lastTurnMs: Date.now() - started } : {}),
+        });
       },
       onAudio: (_id, pcm) => this.playback.enqueue(pcm),
       onSayEnd: () => {},
