@@ -5,12 +5,18 @@ frame header (§2), hello/ready, JSON control/event messages (§5), and clock-sy
 time_ping (§8). Providers (STT/TTS/brain) are injected via a factory so tests
 drive fakes and the 5090 runs the real stack.
 
-§9 session resume is NOT implemented yet: every `hello` builds a fresh session
-and `ready.resumed` is always false. `session_ttl_s` is advertised but no session
-store retains state across a reconnect, and the engine does not send `bye` on
-shutdown/supersede. A reconnect after a network blip therefore loses conversation
-context (the client survives — §9 permits resumed:false — but the context is gone).
-Full resume + supersession is a tracked gap, not a claim this file makes.
+§9 session resume: CONVERSATION CONTEXT now survives. A `hello` carrying a
+`session_id` seen before reloads that conversation from disk (engine/session.py
+load_history) and `ready.resumed` reports it honestly. This closes the P7 hole the
+previous note described: an engine restart, a network blip, or a weekend away no
+longer wipes what you were talking about. It is also the
+precondition for ever offering her a restart button: P8 ranks stability above
+capability, but a restart that forgets the conversation trades one instability for a
+worse one.
+
+Still NOT implemented: live session SUPERSESSION (a second connection claiming an
+id does not evict the first) and the engine does not send `bye` on shutdown. Those
+remain tracked gaps, not claims this file makes.
 
 Run live:  python -m engine.server --host 0.0.0.0 --port 8788
 """
@@ -265,6 +271,9 @@ class VoiceServer:
                                min_speech_ms=min_speech, silence_ms=silence,
                                level_events=level_events, pace=self.pace, loop=loop)
         conn.session = session
+        # §9: report the truth about resume. The engine used to hardcode
+        # resumed:false because no context survived; it does now.
+        resumed = getattr(session, "resumed", False)
         t_session_start = time.perf_counter()
         meta = _session_metadata(hello)
         emit_telemetry("session.start", actor_type="human", actor_id=ent.user_id,
@@ -272,7 +281,7 @@ class VoiceServer:
 
         await ws.send(json.dumps({
             "type": "ready", "protocol": PROTOCOL, "session_id": session_id,
-            "resumed": False, "audio_out": {"rate": 24000},
+            "resumed": resumed, "audio_out": {"rate": 24000},
             "limits": {"session_ttl_s": SESSION_TTL_S,
                        "vad": {"silence_ms": session._seg.silence_ms,
                                "min_speech_ms": session._seg.min_speech_ms}}}))

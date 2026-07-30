@@ -55,3 +55,17 @@ def _no_live_desktop(monkeypatch):
     # says — a stray WINDYTALK_VISION_URL would turn click tests into real
     # screenshots + model calls.
     monkeypatch.delenv("WINDYTALK_VISION_URL", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_session_store(tmp_path, monkeypatch):
+    """Conversation persistence must never write to the developer's real home.
+
+    The engine now saves each session's transcript under ~/.windytalk/sessions/
+    (§9 resume). make_session()'s default id is "t", so without this every test
+    that drives a turn dropped a t.json into Grant's actual home directory — and
+    worse, tests would start RESUMING each other's conversations, which is exactly
+    the cross-contamination the persistence feature must not have. Same posture as
+    the guardrails above: tests never touch the live machine.
+    """
+    monkeypatch.setenv("WINDYTALK_SESSION_DIR", str(tmp_path / "sessions"))

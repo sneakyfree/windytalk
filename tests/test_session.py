@@ -48,13 +48,13 @@ class FakeBrain:
         yield BrainEvent(kind="done", finish_reason="stop")
 
 
-def make_session(brain, stt=None, **kw):
+def make_session(brain, stt=None, session_id="t", **kw):
     events = []
 
     async def emit(e):
         events.append(e)
     s = VoiceSession(stt or FakeSTT(), FakeTTS(), brain, emit,
-                     session_id="t", pace=False, **kw)
+                     session_id=session_id, pace=False, **kw)
     s._events = events
     return s
 
@@ -793,3 +793,39 @@ async def test_a_normal_speed_turn_never_mentions_still_working(monkeypatch):
     spoken = [e.get("text", "") for e in s._events if e["type"] == "say_start"]
     assert not any("still working" in t.lower() for t in spoken)
     assert any("quick answer" in t.lower() for t in spoken)
+
+
+@pytest.mark.asyncio
+async def test_conversation_survives_an_engine_restart(tmp_path, monkeypatch):
+    """§9 / P7: the conversation must outlive the process.
+
+    Windy Talk's own server docstring admitted this hole — "every hello builds a
+    fresh session ... the context is gone". P7 promises grandma "can never tell when
+    it refreshed context", and it is the precondition for ever offering her a restart
+    button: P8 ranks stability above capability, but a restart that forgets the
+    weekend trades one instability for a worse one.
+    """
+    monkeypatch.setenv("WINDYTALK_SESSION_DIR", str(tmp_path))
+    sid = "s-restart-me"
+
+    first = make_session(FakeBrain([[BrainEvent(kind="text", text="Blue is the sky.")]]),
+                         session_id=sid)
+    await first.start()
+    await first.on_mic(True)
+    await first.on_text("what colour is the sky")
+    if first._turn_task:
+        await first._turn_task
+    assert first.resumed is False, "a brand-new session must not claim it resumed"
+
+    del first                                   # the process dies here
+
+    second = make_session(FakeBrain([[BrainEvent(kind="text", text="ok")]]),
+                          session_id=sid)
+    assert second.resumed is True, "reconnect did not report a resume"
+    joined = " ".join(m.get("content", "") for m in second._history)
+    assert "what colour is the sky" in joined, "the user's question was forgotten"
+    assert "blue is the sky" in joined.lower(), "her own answer was forgotten"
+
+    fresh = make_session(FakeBrain([[BrainEvent(kind="text", text="ok")]]),
+                         session_id="s-somebody-else")
+    assert fresh._history == [] and fresh.resumed is False, "sessions leaked into each other"

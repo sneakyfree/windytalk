@@ -112,6 +112,58 @@ _NOTICE_MIN_UTTERANCE_S = 0.7
 # timeout that left Grant staring at a yellow dot with no information.
 _WORKING_AFTER_S = 18.0
 _STILL_WORKING_LINE = "Still working on that one — hang with me."
+# Turns kept on disk per session. Far more than the 12 the brain is given, so a
+# resumed conversation still has depth behind the window.
+HISTORY_KEEP = 60
+
+
+# ── conversation persistence (§9 resume) ────────────────────────────────────
+# Windy Talk's own docstring called this out: "§9 session resume is NOT implemented
+# yet ... the context is gone." That is a P7 hole with teeth — P7 promises grandma
+# "can never tell when it refreshed context", and every engine restart wiped the
+# conversation. It is also the PREREQUISITE for giving her a restart button at all:
+# P8 ranks stability above capability, but a restart that forgets the weekend trades
+# one instability for a worse one.
+#
+# Deliberately dumb (P5): a plain JSON list of {role, content} per session, written
+# after each turn, atomically. No schema, no index, no db. The substrate is dumb;
+# the model supplies the skill of using it.
+
+def _session_dir():
+    from pathlib import Path
+    d = Path(os.environ.get("WINDYTALK_SESSION_DIR",
+                            Path.home() / ".windytalk" / "sessions"))
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _session_file(session_id: str):
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", session_id or "unknown")[:120]
+    return _session_dir() / f"{safe}.json"
+
+
+def load_history(session_id: str, limit: int = HISTORY_KEEP) -> list[dict]:
+    """Prior turns for this session, or [] — never raises. A missing/corrupt file
+    means a fresh conversation, which is exactly the old behaviour."""
+    try:
+        raw = json.loads(_session_file(session_id).read_text("utf-8"))
+        msgs = raw.get("messages") if isinstance(raw, dict) else raw
+        return [m for m in msgs if isinstance(m, dict) and m.get("role")][-limit:]
+    except Exception:
+        return []
+
+
+def save_history(session_id: str, history: list[dict], limit: int = HISTORY_KEEP) -> None:
+    """Atomic write of the tail. Never raises: losing the transcript must not be
+    able to break the turn that produced it."""
+    try:
+        f = _session_file(session_id)
+        tmp = f.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"session_id": session_id,
+                                   "messages": history[-limit:]}), "utf-8")
+        os.replace(tmp, f)
+    except Exception:
+        pass
 
 
 class VoiceSession:
@@ -190,7 +242,11 @@ class VoiceSession:
         self._supersede_stuck_ms = _env_ms("WINDYTALK_SUPERSEDE_STUCK_MS", 25000)
         self._turn_started_at: float = 0.0
         self._turn_produced = False             # has this turn emitted a tool_call or speech?
-        self._history: list[dict] = []
+        # Resume the conversation if this session_id has one on disk (§9). P7:
+        # she picks up mid-thought instead of greeting a stranger she spoke to
+        # ten minutes ago.
+        self._history: list[dict] = load_history(session_id)
+        self.resumed = bool(self._history)
         self._partial_reply: list[str] = []
         self._tool_futures: dict[str, asyncio.Future] = {}
 
@@ -444,6 +500,7 @@ class VoiceSession:
                 waiter.cancel()
             if reply:
                 self._history.append({"role": "assistant", "content": reply})
+                save_history(self.session_id, self._history)
             else:
                 # A turn that produces nothing sayable must still SAY so. Otherwise
                 # the engine slides back to listening in silence and the user cannot
@@ -452,6 +509,7 @@ class VoiceSession:
                 # phase. Goes into history too, so the brain knows it went quiet.
                 await self._speak_fallback(_NO_REPLY_LINE)
                 self._history.append({"role": "assistant", "content": _NO_REPLY_LINE})
+                save_history(self.session_id, self._history)
         except asyncio.CancelledError:
             # A cancelled (barged/superseded) reply must still enter history —
             # otherwise the brain has no memory it ever answered and confabulates
@@ -460,6 +518,7 @@ class VoiceSession:
             if partial:
                 self._history.append({"role": "assistant", "content":
                                       partial + " [interrupted by the user before finishing]"})
+                save_history(self.session_id, self._history)
             raise
         except Exception:
             await self._speak_fallback()
